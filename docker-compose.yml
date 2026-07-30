@@ -1,0 +1,9 @@
+services:
+  golden-coast:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./golden_coast.db:/app/golden_coast.db
+      - ./uploads:/app/uploads
+    restart: unless-stopped

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17365d">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/app.css">
+  <title>شركة جولدن كوست التجارية</title>
+</head>
+<body>
+  <div id="loginView" class="page">
+    <div class="card login-card">
+      <h1>شركة جولدن كوست التجارية</h1>
+      <p>منصة إدارة العمليات — متابعة الفواتير</p>
+      <form id="loginForm">
+        <label>اسم المستخدم</label>
+        <input name="username" required autocomplete="username">
+        <label>كلمة المرور</label>
+        <input name="password" type="password" required autocomplete="current-password">
+        <button type="submit">دخول</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="appView" class="hidden">
+    <header>
+      <div>
+        <strong>شركة جولدن كوست التجارية</strong>
+        <small>متابعة الفواتير والتوزيع</small>
+      </div>
+      <div><span id="userLabel"></span> <button id="logoutBtn" class="secondary">خروج</button></div>
+    </header>
+
+    <main class="page">
+      <section id="stats" class="stats"></section>
+
+      <nav class="tabs">
+        <button data-tab="queue" class="active">المعلقة عندي</button>
+        <button data-tab="search">البحث والأرشيف</button>
+        <button id="usersTab" data-tab="users" class="hidden">المستخدمون</button>
+        <button id="vehiclesTab" data-tab="vehicles" class="hidden">السيارات</button>
+        <button id="logsTab" data-tab="logs" class="hidden">الحركات</button>
+      </nav>
+
+      <section id="queueSection">
+        <div class="toolbar">
+          <button id="newInvoiceBtn" class="success hidden">+ إدخال فاتورة</button>
+          <button id="refreshBtn">تحديث</button>
+        </div>
+        <div class="card">
+          <h2>الفواتير المعلقة عندك</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th></th></tr></thead>
+              <tbody id="queueBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="searchSection" class="hidden">
+        <div class="toolbar">
+          <input id="searchInput" placeholder="رقم الفاتورة أو اسم العميل">
+          <label class="inline"><input id="includeClosed" type="checkbox"> يشمل المكتملة</label>
+          <button id="searchBtn">بحث</button>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>التاريخ</th><th></th></tr></thead>
+            <tbody id="searchBody"><tr><td colspan="6">اكتب كلمة بحث.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="usersSection" class="hidden">
+        <div class="toolbar"><button id="newUserBtn" class="success">+ مستخدم جديد</button></div>
+        <div class="card table-wrap">
+          <table>
+            <thead><tr><th>المستخدم</th><th>الاسم</th><th>الدور</th><th>رمز السائق</th><th>الجوال</th><th>الحالة</th></tr></thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="vehiclesSection" class="hidden">
+        <div class="toolbar">
+          <button id="newVehicleBtn" class="success">+ إضافة سيارة</button>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead><tr><th>السيارة</th><th>اللوحة</th><th>النوع</th><th>الحالة</th><th>ملاحظات</th></tr></thead>
+            <tbody id="vehiclesBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+
+      <section id="logsSection" class="hidden">
+        <div class="card table-wrap">
+          <table>
+            <thead><tr><th>الوقت</th><th>المستخدم</th><th>الحركة</th><th>الفاتورة</th><th>التفاصيل</th><th></th></tr></thead>
+            <tbody id="logsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <div class="modal-head"><h2 id="modalTitle"></h2><button id="closeModalBtn" class="secondary">إغلاق</button></div>
+      <div id="modalContent"></div>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

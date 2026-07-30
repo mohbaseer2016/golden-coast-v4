@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: golden-coast-operations
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: APP_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        value: /etc/secrets/google-service-account.json
+      - key: GOOGLE_DRIVE_ROOT_FOLDER_ID
+        sync: false
+      - key: PUBLIC_BASE_URL
+        sync: false
