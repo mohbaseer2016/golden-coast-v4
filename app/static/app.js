@@ -121,6 +121,14 @@ function showInvoice(invoice) {
     <b>الحالة:</b> ${statusName(invoice.status)}
   </div>`;
 
+  if (invoice.receipt_photo) {
+    html += `<div class="receipt-photo-wrap">
+      <a href="${attr(invoice.receipt_photo)}" target="_blank" rel="noopener">
+        <img class="receipt-photo" src="${attr(invoice.receipt_photo)}" alt="صورة الاستلام">
+      </a>
+    </div>`;
+  }
+
   if (['ADMIN','WAREHOUSE'].includes(state.user.role) && invoice.status === 'WAREHOUSE_PENDING') {
     html += warehouseForm();
   } else if (['ADMIN','WAREHOUSE'].includes(state.user.role) && invoice.status === 'RETURN_PENDING') {
@@ -190,10 +198,10 @@ function driverForm() {
     </select>
     <label>كمية المرتجع</label><input name="return_qty_declared" type="number" step="0.01" value="0">
     <label>السبب</label><input name="reason">
-    <label>صورة الاستلام</label><input name="receipt_photo" type="file" accept="image/*">
+    <label>صورة الاستلام</label><input id="driverReceiptPhoto" name="receipt_photo" type="file" accept="image/*" required>
     <label>صورة المرتجع</label><input name="return_photo" type="file" accept="image/*">
     <label>ملاحظات</label><textarea name="notes"></textarea>
-    <button>اعتماد</button>
+    <button id="driverSubmitBtn" disabled>اعتماد</button>
   </form>`;
 }
 
@@ -236,6 +244,16 @@ function bindModalForms() {
   forms.forEach(([id, path]) => {
     const form = document.getElementById(id);
     if (!form) return;
+
+    if (id === 'driverForm') {
+      const receiptInput = form.querySelector('[name="receipt_photo"]');
+      const submitButton = form.querySelector('button[type="submit"], button:not([type])');
+      const refreshDriverSubmit = () => {
+        submitButton.disabled = !(receiptInput.files && receiptInput.files.length > 0);
+      };
+      receiptInput.addEventListener('change', refreshDriverSubmit);
+      refreshDriverSubmit();
+    }
 
     form.addEventListener('submit', async event => {
       event.preventDefault();
@@ -468,12 +486,17 @@ function showEditDriver() {
     </select>
     <label>كمية المرتجع</label><input name="return_qty_declared" type="number" step="0.01" value="${i.return_qty_declared || 0}">
     <label>السبب</label><input name="reason" value="${attr(i.delivery_reason || '')}">
-    <label>صورة استلام جديدة</label><input name="receipt_photo" type="file" accept="image/*">
+    <label>صورة استلام جديدة</label><input id="editDriverReceiptPhoto" name="receipt_photo" type="file" accept="image/*" ${i.receipt_photo ? '' : 'required'}>
     <label>صورة مرتجع جديدة</label><input name="return_photo" type="file" accept="image/*">
     <label>ملاحظات السائق</label><textarea name="notes">${esc(i.driver_notes || '')}</textarea>
-    <button class="success">حفظ</button>
+    <button id="editDriverSubmitBtn" class="success" ${i.receipt_photo ? '' : 'disabled'}>حفظ</button>
   </form>`;
   const form = document.getElementById('editDriverInvoiceForm');
+  const receiptInput = form.querySelector('[name="receipt_photo"]');
+  const submitButton = document.getElementById('editDriverSubmitBtn');
+  receiptInput.addEventListener('change', () => {
+    submitButton.disabled = !(i.receipt_photo || (receiptInput.files && receiptInput.files.length > 0));
+  });
   form.addEventListener('submit', async e => {
     e.preventDefault();
     try {

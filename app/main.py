@@ -395,8 +395,10 @@ def driver_update(
 
     receipt = save_upload(receipt_photo, invoice_no, "receipt")
     returned = save_upload(return_photo, invoice_no, "return_driver")
-    if delivery_result == "تم كامل" and not (receipt or invoice.receipt_photo):
-        raise HTTPException(status_code=400, detail="صورة الاستلام مطلوبة.")
+    # لا يسمح للسائق باعتماد أي نتيجة قبل وجود صورة استلام.
+    # التحقق في الخادم يمنع تجاوز الشرط حتى لو عُطّل فحص الواجهة.
+    if user["role"] == "DRIVER" and not (receipt or invoice.receipt_photo):
+        raise HTTPException(status_code=400, detail="يجب رفع صورة الاستلام قبل اعتماد النتيجة.")
 
     invoice.delivery_result = delivery_result
     invoice.delivery_reason = reason.strip() or None
@@ -679,6 +681,8 @@ def edit_invoice_driver(
 
     receipt = save_upload(receipt_photo, invoice_no, "receipt_edit")
     returned = save_upload(return_photo, invoice_no, "return_driver_edit")
+    if user["role"] == "DRIVER" and not (receipt or invoice.receipt_photo):
+        raise HTTPException(status_code=400, detail="يجب رفع صورة الاستلام قبل اعتماد النتيجة.")
     invoice.delivery_result = delivery_result
     invoice.delivery_reason = reason.strip() or None
     invoice.driver_notes = notes.strip() or None
