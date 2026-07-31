@@ -15,7 +15,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
-from .drive_service import DriveStorage
+from .drive_service import SupabaseStorage
 from .models import AuditLog, Invoice, User, Vehicle
 from .security import clear_session, hash_password, require_role, require_user, set_session, verify_password
 
@@ -48,11 +48,13 @@ def save_upload(file: UploadFile | None, invoice_no: str, kind: str) -> str | No
     if not (file.content_type or "").startswith("image/"):
         raise HTTPException(status_code=400, detail="المسموح صور فقط.")
     raw = file.file.read()
-    if os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") and os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID"):
+    if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
         try:
-            return DriveStorage().upload_image(invoice_no, kind, raw)
+            return SupabaseStorage().upload_image(invoice_no, kind, raw)
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"فشل رفع الصورة إلى Google Drive: {exc}")
+            raise HTTPException(status_code=500, detail=f"فشل رفع الصورة إلى Supabase Storage: {exc}")
+
+    # Local fallback for development only. Render must use Supabase Storage.
     suffix = Path(file.filename).suffix.lower() or ".jpg"
     folder = UPLOAD_DIR / str(datetime.now().year) / f"{datetime.now().month:02d}" / invoice_no
     folder.mkdir(parents=True, exist_ok=True)

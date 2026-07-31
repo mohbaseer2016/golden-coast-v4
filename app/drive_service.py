@@ -1,41 +1,61 @@
 import io
 import os
+import uuid
 from datetime import datetime
-from pathlib import Path
-from PIL import Image
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+from urllib.parse import quote
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+import httpx
+from PIL import Image, UnidentifiedImageError
 
-class DriveStorage:
+
+class SupabaseStorage:
+    """Uploads invoice images to a Supabase Storage public bucket."""
+
     def __init__(self):
-        key_path = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-        root_folder_id = os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
-        if not key_path or not Path(key_path).exists() or not root_folder_id:
-            raise RuntimeError("Google Drive غير مهيأ")
-        credentials = service_account.Credentials.from_service_account_file(key_path, scopes=SCOPES)
-        self.drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
-        self.root_folder_id = root_folder_id
+        self.supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
+        self.service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+        self.bucket = os.getenv("SUPABASE_STORAGE_BUCKET", "invoice-attachments")
 
-    def _folder(self, name: str, parent_id: str) -> str:
-        safe = name.replace("'", "\'")
-        q = f"name='{safe}' and mimeType='application/vnd.google-apps.folder' and '{parent_id}' in parents and trashed=false"
-        found = self.drive.files().list(q=q, spaces="drive", fields="files(id,name)", pageSize=1).execute().get("files", [])
-        if found:
-            return found[0]["id"]
-        return self.drive.files().create(body={"name":name,"mimeType":"application/vnd.google-apps.folder","parents":[parent_id]},fields="id").execute()["id"]
+        if not self.supabase_url or not self.service_role_key:
+            raise RuntimeError(
+                "إعداد Supabase Storage غير مكتمل. أضف SUPABASE_URL وSUPABASE_SERVICE_ROLE_KEY."
+            )
+
+    @staticmethod
+    def _compress_image(raw: bytes) -> bytes:
+        try:
+            image = Image.open(io.BytesIO(raw)).convert("RGB")
+        except (UnidentifiedImageError, OSError) as exc:
+            raise ValueError("الملف المرفوع ليس صورة صالحة.") from exc
+
+        image.thumbnail((1600, 1600))
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=72, optimize=True)
+        return output.getvalue()
 
     def upload_image(self, invoice_no: str, kind: str, raw: bytes) -> str:
-        now=datetime.now()
-        year=self._folder(str(now.year),self.root_folder_id)
-        month=self._folder(f"{now.month:02d}",year)
-        inv=self._folder(invoice_no,month)
-        image=Image.open(io.BytesIO(raw)).convert("RGB")
-        image.thumbnail((1600,1600))
-        out=io.BytesIO(); image.save(out,format="JPEG",quality=72,optimize=True)
-        out.seek(0)
-        media=MediaIoBaseUpload(out,mimetype="image/jpeg",resumable=False)
-        created=self.drive.files().create(body={"name":f"{kind}_{now.strftime('%Y%m%d_%H%M%S')}.jpg","parents":[inv]},media_body=media,fields="id,webViewLink").execute()
-        return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+        now = datetime.now()
+        safe_invoice = "".join(c for c in invoice_no if c.isalnum() or c in ("-", "_")) or "invoice"
+        filename = f"{kind}_{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.jpg"
+        object_path = f"{now.year}/{now.month:02d}/{safe_invoice}/{filename}"
+        encoded_path = quote(object_path, safe="/")
+
+        payload = self._compress_image(raw)
+        headers = {
+            "apikey": self.service_role_key,
+            "Authorization": f"Bearer {self.service_role_key}",
+            "Content-Type": "image/jpeg",
+            "x-upsert": "false",
+        }
+        upload_url = f"{self.supabase_url}/storage/v1/object/{self.bucket}/{encoded_path}"
+
+        try:
+            response = httpx.post(upload_url, content=payload, headers=headers, timeout=60.0)
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"تعذر الاتصال بـ Supabase Storage: {exc}") from exc
+
+        if response.status_code not in (200, 201):
+            detail = response.text[:500]
+            raise RuntimeError(f"فشل رفع الصورة ({response.status_code}): {detail}")
+
+        return f"{self.supabase_url}/storage/v1/object/public/{self.bucket}/{encoded_path}"
