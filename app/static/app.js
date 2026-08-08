@@ -2,7 +2,44 @@
 
 const state = {user:null, drivers:[], vehicles:[], users:[], logs:[], products:[], permissions:{screens:[],actions:[]}, permissionCatalog:{}, current:null};
 
+const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
+let inactivityTimer = null;
+let lastActivityAt = Date.now();
+
+function resetInactivityTimer() {
+  lastActivityAt = Date.now();
+  clearTimeout(inactivityTimer);
+  if (!state.user) return;
+  inactivityTimer = setTimeout(forceIdleLogout, INACTIVITY_LIMIT_MS);
+}
+
+async function forceIdleLogout() {
+  try { await fetch('/api/logout', {method:'POST'}); } catch (_) {}
+  clearTimeout(inactivityTimer);
+  state.user = null;
+  document.getElementById('appView')?.classList.add('hidden');
+  document.getElementById('loginView')?.classList.remove('hidden');
+  const form = document.getElementById('loginForm');
+  if (form) form.reset();
+  toast('انتهت الجلسة بسبب عدم الاستخدام لمدة 10 دقائق. سجل الدخول من جديد.', true);
+}
+
+function setupInactivityWatch() {
+  ['click','keydown','input','touchstart','mousemove','scroll'].forEach(eventName => {
+    document.addEventListener(eventName, () => {
+      if (state.user) resetInactivityTimer();
+    }, {passive:true});
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!state.user) return;
+    if (!document.hidden && Date.now() - lastActivityAt >= INACTIVITY_LIMIT_MS) {
+      forceIdleLogout();
+    }
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  setupInactivityWatch();
   bind('loginForm','submit',login);
   bind('logoutBtn','click',logout);
   bind('refreshBtn','click',bootstrap);
@@ -26,7 +63,15 @@ function bind(id, event, handler) {
 async function api(url, options={}) {
   const response = await fetch(url, options);
   const data = await response.json().catch(() => ({detail:'حدث خطأ'}));
-  if (!response.ok) throw new Error(data.detail || 'حدث خطأ');
+  if (!response.ok) {
+    if (response.status === 401 && state.user) {
+      clearTimeout(inactivityTimer);
+      state.user = null;
+      document.getElementById('appView')?.classList.add('hidden');
+      document.getElementById('loginView')?.classList.remove('hidden');
+    }
+    throw new Error(data.detail || 'حدث خطأ');
+  }
   return data;
 }
 
@@ -41,6 +86,7 @@ async function login(event) {
 }
 
 async function logout() {
+  clearTimeout(inactivityTimer);
   await api('/api/logout', {method:'POST'});
   location.reload();
 }
@@ -49,6 +95,7 @@ async function bootstrap() {
   try {
     const data = await api('/api/bootstrap');
     state.user = data.user;
+    resetInactivityTimer();
     state.drivers = data.drivers;
     state.vehicles = data.vehicles;
     state.users = data.users;
