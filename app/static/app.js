@@ -50,12 +50,12 @@ document.addEventListener('DOMContentLoaded', () => {
   bind('searchBtn','click',search);
   bind('closeModalBtn','click',closeModal);
 
-  ['queueFilter','queueSort'].forEach(id=>bind(id, id.endsWith('Filter')?'input':'change', renderFilteredQueue));
+  ['queueFilter','queueSort','queueSortDirection'].forEach(id=>bind(id, id==='queueFilter'?'input':'change', renderFilteredQueue));
   ['usersFilter','usersRoleFilter','usersStatusFilter','usersSort'].forEach(id=>bind(id, id==='usersFilter'?'input':'change', renderFilteredUsers));
   ['vehiclesFilter','vehiclesStatusFilter','vehiclesSort'].forEach(id=>bind(id, id==='vehiclesFilter'?'input':'change', renderFilteredVehicles));
   ['productsFilter','productsStatusFilter','productsSort'].forEach(id=>bind(id, id==='productsFilter'?'input':'change', renderFilteredProducts));
   ['logsFilter','logsSort'].forEach(id=>bind(id, id==='logsFilter'?'input':'change', renderFilteredLogs));
-  ['searchStatusFilter','searchSort'].forEach(id=>bind(id,'change', renderFilteredSearch));
+  ['searchStatusFilter','searchSort','searchSortDirection'].forEach(id=>bind(id,'change', renderFilteredSearch));
   document.querySelectorAll('[data-tab]').forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
@@ -151,12 +151,17 @@ function renderStats(stats) {
 
 function renderQueue(rows) {
   const body = document.getElementById('queueBody');
-  body.innerHTML = rows.length
-    ? rows.map(rowHtml).join('')
-    : '<tr><td colspan="5">لا توجد فواتير معلقة.</td></tr>';
-  body.querySelectorAll('.open').forEach(btn => {
-    btn.addEventListener('click', () => openInvoice(btn.dataset.no));
-  });
+  if (!body) return;
+  body.innerHTML = rows.length ? rows.map(i => `<tr>
+    <td><b>${esc(i.invoice_no)}</b></td>
+    <td>${esc(i.customer || '')}</td>
+    <td>${esc(i.driver_name || 'لم يحدد')}</td>
+    <td>${statusName(i.status)}</td>
+    <td>${dateOnlyText(i.invoice_date)}</td>
+    <td>${i.loaded_at ? dateTimeText(i.loaded_at) : ''}</td>
+    <td><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
+  </tr>`).join('') : '<tr><td colspan="7">لا توجد فواتير معلقة.</td></tr>';
+  body.querySelectorAll('.open').forEach(btn => btn.addEventListener('click', () => openInvoice(btn.dataset.no)));
 }
 
 function rowHtml(invoice) {
@@ -813,31 +818,51 @@ async function deleteUser(username){if(!confirm('إيقاف هذا المستخ�
 
 function norm(v){return String(v??'').toLowerCase().trim();}
 function sortRows(rows,key,desc=false){
+  const dateKeys = new Set(['invoice_date','loaded_at','created_at','updated_at']);
   return [...rows].sort((a,b)=>{
-    const av=a?.[key]??'', bv=b?.[key]??'';
-    const cmp=String(av).localeCompare(String(bv),'ar',{numeric:true,sensitivity:'base'});
-    return desc?-cmp:cmp;
+    const av=a?.[key], bv=b?.[key];
+    // القيم الفارغة تكون في النهاية دائماً، خصوصاً تاريخ التحميل قبل أن يتم التحميل.
+    const ae = av === null || av === undefined || av === '';
+    const be = bv === null || bv === undefined || bv === '';
+    if(ae && be) return 0;
+    if(ae) return 1;
+    if(be) return -1;
+
+    let cmp=0;
+    if(dateKeys.has(key)){
+      const at=new Date(av).getTime(), bt=new Date(bv).getTime();
+      cmp=(Number.isNaN(at)?0:at)-(Number.isNaN(bt)?0:bt);
+    } else if(key==='invoice_no'){
+      const an=Number(av), bn=Number(bv);
+      cmp=(!Number.isNaN(an)&&!Number.isNaN(bn)) ? an-bn :
+        String(av).localeCompare(String(bv),'ar',{numeric:true,sensitivity:'base'});
+    } else {
+      cmp=String(av).localeCompare(String(bv),'ar',{numeric:true,sensitivity:'base'});
+    }
+    return desc ? -cmp : cmp;
   });
 }
 function invoiceHaystack(i){return norm([i.invoice_no,i.customer,i.driver_name,i.status,statusName(i.status),i.invoice_date,i.loaded_at].join(' '));}
 
 function renderFilteredQueue(){
   const q=norm(document.getElementById('queueFilter')?.value);
-  const key=document.getElementById('queueSort')?.value||'invoice_no';
+  const key=document.getElementById('queueSort')?.value||'invoice_date';
+  const desc=(document.getElementById('queueSortDirection')?.value||'desc')==='desc';
   let rows=(state.queue||[]).filter(x=>!q||invoiceHaystack(x).includes(q));
-  renderQueue(sortRows(rows,key));
+  renderQueue(sortRows(rows,key,desc));
 }
 
 function renderFilteredSearch(){
   const status=document.getElementById('searchStatusFilter')?.value||'';
   const key=document.getElementById('searchSort')?.value||'invoice_no';
+  const desc=(document.getElementById('searchSortDirection')?.value||'desc')==='desc';
   let rows=(state.searchRows||[]).filter(x=>!status||x.status===status);
-  rows=sortRows(rows,key);
+  rows=sortRows(rows,key,desc);
   const body=document.getElementById('searchBody'); if(!body)return;
   body.innerHTML=rows.length?rows.map(i=>`<tr>
     <td>${esc(i.invoice_no)}</td><td>${esc(i.customer||'')}</td>
     <td>${esc(i.driver_name||'')}</td><td>${statusName(i.status)}</td>
-    <td>${dateTimeText(i.invoice_date)}</td><td><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
+    <td>${dateOnlyText(i.invoice_date)}</td><td><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
   </tr>`).join(''):'<tr><td colspan="6">لا توجد نتائج.</td></tr>';
   body.querySelectorAll('.open').forEach(btn=>btn.addEventListener('click',()=>openInvoice(btn.dataset.no)));
 }
@@ -873,4 +898,12 @@ function renderFilteredLogs(){
   const q=norm(document.getElementById('logsFilter')?.value), key=document.getElementById('logsSort')?.value||'created_at';
   let rows=(state.logs||[]).filter(l=>!q||norm([l.username,l.action,l.invoice_no,l.details].join(' ')).includes(q));
   renderLogs(sortRows(rows,key,key==='created_at'));
+}
+
+function dateOnlyText(value){
+  if(!value) return '';
+  const s=String(value);
+  const d=new Date(s);
+  if(Number.isNaN(d.getTime())) return esc(s.slice(0,10));
+  return d.toLocaleDateString('ar-YE',{year:'numeric',month:'2-digit',day:'2-digit'});
 }

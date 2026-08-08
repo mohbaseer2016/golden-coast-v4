@@ -50,19 +50,23 @@
           <button id="refreshBtn">تحديث</button>
           <input id="queueFilter" placeholder="بحث في الفواتير المعلقة">
           <select id="queueSort">
+            <option value="invoice_date">تاريخ الفاتورة</option>
+            <option value="loaded_at">تاريخ التحميل</option>
             <option value="invoice_no">رقم الفاتورة</option>
             <option value="customer">العميل</option>
             <option value="driver_name">السائق</option>
             <option value="status">الحالة</option>
-            <option value="invoice_date">تاريخ الفاتورة</option>
-            <option value="loaded_at">تاريخ التحميل</option>
+          </select>
+          <select id="queueSortDirection">
+            <option value="desc">الأحدث / الأكبر أولاً</option>
+            <option value="asc">الأقدم / الأصغر أولاً</option>
           </select>
         </div>
         <div class="card">
           <h2>الفواتير المعلقة عندك</h2>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th></th></tr></thead>
+              <thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>تاريخ الفاتورة</th><th>تاريخ التحميل</th><th></th></tr></thead>
               <tbody id="queueBody"></tbody>
             </table>
           </div>
@@ -89,6 +93,10 @@
             <option value="status">الحالة</option>
             <option value="invoice_date">تاريخ الفاتورة</option>
             <option value="loaded_at">تاريخ التحميل</option>
+          </select>
+          <select id="searchSortDirection">
+            <option value="desc">الأحدث / الأكبر أولاً</option>
+            <option value="asc">الأقدم / الأصغر أولاً</option>
           </select>
           <button id="searchBtn">بحث</button>
         </div>
