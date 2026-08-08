@@ -1,6 +1,6 @@
 'use strict';
 
-const state = {user:null, drivers:[], vehicles:[], users:[], logs:[], products:[], permissions:{screens:[],actions:[]}, permissionCatalog:{}, current:null};
+const state = {user:null, drivers:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], permissions:{screens:[],actions:[]}, permissionCatalog:{}, current:null};
 
 const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
 let inactivityTimer = null;
@@ -49,6 +49,13 @@ document.addEventListener('DOMContentLoaded', () => {
   bind('newProductBtn','click',showNewProduct);
   bind('searchBtn','click',search);
   bind('closeModalBtn','click',closeModal);
+
+  ['queueFilter','queueSort'].forEach(id=>bind(id, id.endsWith('Filter')?'input':'change', renderFilteredQueue));
+  ['usersFilter','usersRoleFilter','usersStatusFilter','usersSort'].forEach(id=>bind(id, id==='usersFilter'?'input':'change', renderFilteredUsers));
+  ['vehiclesFilter','vehiclesStatusFilter','vehiclesSort'].forEach(id=>bind(id, id==='vehiclesFilter'?'input':'change', renderFilteredVehicles));
+  ['productsFilter','productsStatusFilter','productsSort'].forEach(id=>bind(id, id==='productsFilter'?'input':'change', renderFilteredProducts));
+  ['logsFilter','logsSort'].forEach(id=>bind(id, id==='logsFilter'?'input':'change', renderFilteredLogs));
+  ['searchStatusFilter','searchSort'].forEach(id=>bind(id,'change', renderFilteredSearch));
   document.querySelectorAll('[data-tab]').forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
@@ -100,6 +107,7 @@ async function bootstrap() {
     state.vehicles = data.vehicles;
     state.users = data.users;
     state.logs = data.logs || [];
+    state.queue = data.queue || [];
     state.products = data.products || [];
     state.permissions = data.permissions || {screens:[],actions:[]};
     state.permissionCatalog = data.permission_catalog || {};
@@ -114,11 +122,11 @@ async function bootstrap() {
     document.getElementById('logsTab').classList.toggle('hidden', state.user.role !== 'ADMIN');
 
     renderStats(data.stats);
-    renderQueue(data.queue);
-    renderUsers(data.users || []);
-    renderVehicles(data.vehicles || []);
-    renderLogs(data.logs || []);
-    renderProducts(state.products);
+    renderFilteredQueue();
+    renderFilteredUsers();
+    renderFilteredVehicles();
+    renderFilteredLogs();
+    renderFilteredProducts();
   } catch (error) {
     if (!error.message.includes('الجلسة')) console.error(error);
   }
@@ -341,18 +349,8 @@ async function search() {
   try {
     const q = encodeURIComponent(document.getElementById('searchInput').value);
     const closed = document.getElementById('includeClosed').checked;
-    const rows = await api(`/api/invoices/search?q=${q}&include_closed=${closed}`);
-    const body = document.getElementById('searchBody');
-    body.innerHTML = rows.length
-      ? rows.map(i => `<tr>
-          <td>${esc(i.invoice_no)}</td><td>${esc(i.customer || '')}</td>
-          <td>${esc(i.driver_name || '')}</td><td>${statusName(i.status)}</td>
-          <td></td><td><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
-        </tr>`).join('')
-      : '<tr><td colspan="6">لا توجد نتائج.</td></tr>';
-    body.querySelectorAll('.open').forEach(btn => {
-      btn.addEventListener('click', () => openInvoice(btn.dataset.no));
-    });
+    state.searchRows = await api(`/api/invoices/search?q=${q}&include_closed=${closed}`);
+    renderFilteredSearch();
   } catch (error) {
     toast(error.message, true);
   }
@@ -369,7 +367,9 @@ function renderUsers(rows) {
         <td>${esc(user.phone || '')}</td>
         <td>${user.active ? 'نشط' : 'موقوف'}</td>
         <td><button class="edit-user" data-user="${attr(user.username)}">تعديل</button>
-            ${user.username !== 'admin' ? `<button class="perm-user secondary" data-user="${attr(user.username)}">صلاحيات</button>` : ''}</td>
+            ${user.username !== 'admin' ? `<button class="perm-user secondary" data-user="${attr(user.username)}">صلاحيات</button>
+            <button class="toggle-user warn" data-user="${attr(user.username)}">${user.active?'توقيف':'تفعيل'}</button>
+            <button class="delete-user danger" data-user="${attr(user.username)}">حذف</button>` : ''}</td>
       </tr>`).join('')
     : '<tr><td colspan="7">لا يوجد مستخدمون.</td></tr>';
 
@@ -378,6 +378,12 @@ function renderUsers(rows) {
   });
   body.querySelectorAll('.perm-user').forEach(btn => {
     btn.addEventListener('click', () => showPermissions(btn.dataset.user));
+  });
+  body.querySelectorAll('.toggle-user').forEach(btn => {
+    btn.addEventListener('click', () => toggleUser(btn.dataset.user));
+  });
+  body.querySelectorAll('.delete-user').forEach(btn => {
+    btn.addEventListener('click', () => deleteUser(btn.dataset.user));
   });
 }
 
@@ -431,15 +437,22 @@ function showEditUser(username) {
 }
 
 function renderVehicles(rows) {
-  document.getElementById('vehiclesBody').innerHTML = rows.length
+  const body = document.getElementById('vehiclesBody');
+  body.innerHTML = rows.length
     ? rows.map(vehicle => `<tr>
-        <td>${esc(vehicle.name)}</td>
-        <td>${esc(vehicle.plate_no)}</td>
-        <td>${esc(vehicle.vehicle_type || '')}</td>
-        <td>${vehicleStatus(vehicle.status)}</td>
+        <td>${esc(vehicle.name)}</td><td>${esc(vehicle.plate_no)}</td>
+        <td>${esc(vehicle.vehicle_type || '')}</td><td>${esc(vehicle.status)}</td>
         <td>${esc(vehicle.notes || '')}</td>
+        <td>
+          <button class="edit-vehicle" data-id="${vehicle.id}">تعديل</button>
+          <button class="toggle-vehicle secondary" data-id="${vehicle.id}">${vehicle.active===false?'تفعيل':'تعطيل'}</button>
+          <button class="delete-vehicle danger" data-id="${vehicle.id}">حذف</button>
+        </td>
       </tr>`).join('')
-    : '<tr><td colspan="5">لا توجد سيارات. أضف أول سيارة.</td></tr>';
+    : '<tr><td colspan="6">لا توجد سيارات.</td></tr>';
+  body.querySelectorAll('.edit-vehicle').forEach(x=>x.addEventListener('click',()=>showEditVehicle(Number(x.dataset.id))));
+  body.querySelectorAll('.toggle-vehicle').forEach(x=>x.addEventListener('click',()=>toggleVehicle(Number(x.dataset.id))));
+  body.querySelectorAll('.delete-vehicle').forEach(x=>x.addEventListener('click',()=>deleteVehicle(Number(x.dataset.id))));
 }
 
 function showNewVehicle() {
@@ -735,7 +748,19 @@ async function showDashboardBucket(bucket,title){
 }
 function renderProducts(rows){
   const b=document.getElementById('productsBody'); if(!b)return;
-  b.innerHTML=rows.length?rows.map(p=>`<tr><td>${esc(p.name)}</td><td>${esc((p.units||[]).join('، '))}</td></tr>`).join(''):'<tr><td colspan="2">لا توجد أصناف.</td></tr>';
+  b.innerHTML=rows.length?rows.map(p=>`<tr>
+    <td>${esc(p.name)}</td>
+    <td>${esc((p.units||[]).join('، '))}</td>
+    <td>${p.active?'فعال':'موقوف'}</td>
+    <td>
+      <button class="edit-product" data-id="${p.id}">تعديل</button>
+      <button class="toggle-product secondary" data-id="${p.id}">${p.active?'تعطيل':'تفعيل'}</button>
+      <button class="delete-product danger" data-id="${p.id}">حذف</button>
+    </td>
+  </tr>`).join(''):'<tr><td colspan="4">لا توجد أصناف.</td></tr>';
+  b.querySelectorAll('.edit-product').forEach(x=>x.addEventListener('click',()=>showEditProduct(Number(x.dataset.id))));
+  b.querySelectorAll('.toggle-product').forEach(x=>x.addEventListener('click',()=>toggleProduct(Number(x.dataset.id))));
+  b.querySelectorAll('.delete-product').forEach(x=>x.addEventListener('click',()=>deleteProduct(Number(x.dataset.id))));
 }
 function showNewProduct(){
   document.getElementById('modalTitle').textContent='إضافة صنف';
@@ -749,4 +774,103 @@ function showPermissions(username){
   document.getElementById('modalTitle').textContent='صلاحيات '+u.name;
   document.getElementById('modalContent').innerHTML=`<form id="permissionsForm"><h3>صلاحيات الشاشات</h3><div class="permission-grid">${checks('screens',cat.screens)}</div><h3>صلاحيات العمليات</h3><div class="permission-grid">${checks('actions',cat.actions)}</div><button class="success">حفظ الصلاحيات</button></form>`;
   openModal(); const f=document.getElementById('permissionsForm'); f.addEventListener('submit',async e=>{e.preventDefault();const data={screens:[],actions:[]};f.querySelectorAll('input:checked').forEach(x=>data[x.dataset.group].push(x.value));const fd=new FormData();fd.set('permissions_json',JSON.stringify(data));try{await api('/api/users/'+encodeURIComponent(username)+'/permissions',{method:'POST',body:fd});closeModal();toast('تم حفظ الصلاحيات');await bootstrap();}catch(x){toast(x.message,true);}});
+}
+
+
+function showEditProduct(id){
+  const p=state.products.find(x=>x.id===id); if(!p)return;
+  document.getElementById('modalTitle').textContent='تعديل الصنف';
+  document.getElementById('modalContent').innerHTML=`<form id="editProductForm">
+    <label>اسم الصنف</label><input name="name" required value="${attr(p.name)}">
+    <label>الوحدات</label><input name="units" required value="${attr((p.units||[]).join('، '))}">
+    <label>الحالة</label><select name="active"><option value="true" ${p.active?'selected':''}>فعال</option><option value="false" ${!p.active?'selected':''}>موقوف</option></select>
+    <button class="success">حفظ</button></form>`;
+  openModal(); const f=document.getElementById('editProductForm');
+  f.addEventListener('submit',async e=>{e.preventDefault();try{await api(`/api/products/${id}/update`,{method:'POST',body:new FormData(f)});closeModal();toast('تم تعديل الصنف');await bootstrap();}catch(x){toast(x.message,true);}});
+}
+async function toggleProduct(id){try{const r=await api(`/api/products/${id}/toggle`,{method:'POST'});toast(r.active?'تم تفعيل الصنف':'تم تعطيل الصنف');await bootstrap();}catch(x){toast(x.message,true);}}
+async function deleteProduct(id){if(!confirm('حذف الصنف؟ إذا كان مستخدمًا سابقًا سيتم تعطيله بدل الحذف.'))return;try{const r=await api(`/api/products/${id}/delete`,{method:'POST'});toast(r.message||'تم');await bootstrap();}catch(x){toast(x.message,true);}}
+
+function showEditVehicle(id){
+  const v=state.vehicles.find(x=>Number(x.id)===id); if(!v)return;
+  document.getElementById('modalTitle').textContent='تعديل السيارة';
+  document.getElementById('modalContent').innerHTML=`<form id="editVehicleForm">
+    <label>الاسم</label><input name="name" required value="${attr(v.name)}">
+    <label>رقم اللوحة</label><input name="plate_no" required value="${attr(v.plate_no)}">
+    <label>النوع</label><input name="vehicle_type" value="${attr(v.vehicle_type||'')}">
+    <label>الحالة</label><select name="status"><option value="AVAILABLE">متاحة</option><option value="MISSION">في مهمة</option><option value="MAINTENANCE">صيانة</option><option value="STOPPED">موقوفة</option></select>
+    <label>ملاحظات</label><textarea name="notes">${esc(v.notes||'')}</textarea>
+    <input type="hidden" name="active" value="${v.active===false?'false':'true'}"><button class="success">حفظ</button></form>`;
+  openModal(); const f=document.getElementById('editVehicleForm'); f.querySelector('[name="status"]').value=v.status||'AVAILABLE';
+  f.addEventListener('submit',async e=>{e.preventDefault();try{await api(`/api/vehicles/${id}/update`,{method:'POST',body:new FormData(f)});closeModal();toast('تم تعديل السيارة');await bootstrap();}catch(x){toast(x.message,true);}});
+}
+async function toggleVehicle(id){try{const r=await api(`/api/vehicles/${id}/toggle`,{method:'POST'});toast(r.active?'تم تفعيل السيارة':'تم تعطيل السيارة');await bootstrap();}catch(x){toast(x.message,true);}}
+async function deleteVehicle(id){if(!confirm('حذف السيارة؟ إذا كانت مرتبطة بفواتير سابقة سيتم تعطيلها فقط.'))return;try{const r=await api(`/api/vehicles/${id}/delete`,{method:'POST'});toast(r.message||'تم');await bootstrap();}catch(x){toast(x.message,true);}}
+
+async function toggleUser(username){try{const r=await api(`/api/users/${encodeURIComponent(username)}/toggle`,{method:'POST'});toast(r.active?'تم تفعيل المستخدم':'تم توقيف المستخدم من الدخول');await bootstrap();}catch(x){toast(x.message,true);}}
+async function deleteUser(username){if(!confirm('إيقاف هذا المستخدم وإلغاء دخوله للنظام؟'))return;try{await api(`/api/users/${encodeURIComponent(username)}/delete`,{method:'POST'});toast('تم إيقاف المستخدم');await bootstrap();}catch(x){toast(x.message,true);}}
+
+
+function norm(v){return String(v??'').toLowerCase().trim();}
+function sortRows(rows,key,desc=false){
+  return [...rows].sort((a,b)=>{
+    const av=a?.[key]??'', bv=b?.[key]??'';
+    const cmp=String(av).localeCompare(String(bv),'ar',{numeric:true,sensitivity:'base'});
+    return desc?-cmp:cmp;
+  });
+}
+function invoiceHaystack(i){return norm([i.invoice_no,i.customer,i.driver_name,i.status,statusName(i.status),i.invoice_date,i.loaded_at].join(' '));}
+
+function renderFilteredQueue(){
+  const q=norm(document.getElementById('queueFilter')?.value);
+  const key=document.getElementById('queueSort')?.value||'invoice_no';
+  let rows=(state.queue||[]).filter(x=>!q||invoiceHaystack(x).includes(q));
+  renderQueue(sortRows(rows,key));
+}
+
+function renderFilteredSearch(){
+  const status=document.getElementById('searchStatusFilter')?.value||'';
+  const key=document.getElementById('searchSort')?.value||'invoice_no';
+  let rows=(state.searchRows||[]).filter(x=>!status||x.status===status);
+  rows=sortRows(rows,key);
+  const body=document.getElementById('searchBody'); if(!body)return;
+  body.innerHTML=rows.length?rows.map(i=>`<tr>
+    <td>${esc(i.invoice_no)}</td><td>${esc(i.customer||'')}</td>
+    <td>${esc(i.driver_name||'')}</td><td>${statusName(i.status)}</td>
+    <td>${dateTimeText(i.invoice_date)}</td><td><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
+  </tr>`).join(''):'<tr><td colspan="6">لا توجد نتائج.</td></tr>';
+  body.querySelectorAll('.open').forEach(btn=>btn.addEventListener('click',()=>openInvoice(btn.dataset.no)));
+}
+
+function renderFilteredUsers(){
+  const q=norm(document.getElementById('usersFilter')?.value), role=document.getElementById('usersRoleFilter')?.value||'', status=document.getElementById('usersStatusFilter')?.value||'', key=document.getElementById('usersSort')?.value||'name';
+  let rows=(state.users||[]).filter(u=>{
+    const okQ=!q||norm([u.username,u.name,u.role,roleName(u.role),u.driver_code,u.phone].join(' ')).includes(q);
+    const okR=!role||u.role===role;
+    const okS=!status||(status==='active'?u.active:!u.active);
+    return okQ&&okR&&okS;
+  });
+  renderUsers(sortRows(rows,key));
+}
+
+function renderFilteredVehicles(){
+  const q=norm(document.getElementById('vehiclesFilter')?.value), status=document.getElementById('vehiclesStatusFilter')?.value||'', key=document.getElementById('vehiclesSort')?.value||'name';
+  let rows=(state.vehicles||[]).filter(v=>(!q||norm([v.name,v.plate_no,v.vehicle_type,v.notes].join(' ')).includes(q))&&(!status||v.status===status));
+  renderVehicles(sortRows(rows,key));
+}
+
+function renderFilteredProducts(){
+  const q=norm(document.getElementById('productsFilter')?.value), status=document.getElementById('productsStatusFilter')?.value||'', key=document.getElementById('productsSort')?.value||'name';
+  let rows=(state.products||[]).filter(p=>{
+    const okQ=!q||norm([p.name,(p.units||[]).join(' ')].join(' ')).includes(q);
+    const okS=!status||(status==='active'?p.active:!p.active);
+    return okQ&&okS;
+  });
+  renderProducts(sortRows(rows,key));
+}
+
+function renderFilteredLogs(){
+  const q=norm(document.getElementById('logsFilter')?.value), key=document.getElementById('logsSort')?.value||'created_at';
+  let rows=(state.logs||[]).filter(l=>!q||norm([l.username,l.action,l.invoice_no,l.details].join(' ')).includes(q));
+  renderLogs(sortRows(rows,key,key==='created_at'));
 }

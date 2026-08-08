@@ -326,7 +326,10 @@ def bootstrap(request: Request, db: Session = Depends(get_db)):
         "users": list_users(db) if user["role"] == "ADMIN" else [],
         "logs": list_logs(db) if user["role"] == "ADMIN" else [],
         "products": [{"id": p.id, "name": p.name, "units": json.loads(p.units_json or "[]"), "active": p.active}
-                     for p in db.scalars(select(Product).where(Product.active == True).order_by(Product.name)).all()],
+                     for p in db.scalars(
+                         (select(Product).order_by(Product.name)) if user["role"] == "ADMIN"
+                         else (select(Product).where(Product.active == True).order_by(Product.name))
+                     ).all()],
         "permission_catalog": PERMISSION_CATALOG,
         "permissions": effective_permissions(db.scalar(select(User).where(User.username == user["username"])), user),
     }
@@ -944,3 +947,151 @@ def delete_log(log_id: int, request: Request, db: Session = Depends(get_db)):
     db.commit()
     audit(db, "ADMIN_DELETE_LOG", admin["username"], details=details)
     return {"ok": True}
+
+
+@app.post("/api/products/{product_id}/update")
+def update_product(
+    product_id: int,
+    request: Request,
+    name: str = Form(...),
+    units: str = Form(...),
+    active: str = Form("true"),
+    db: Session = Depends(get_db),
+):
+    user = require_permission(request, db, "manage_products")
+    product = db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="الصنف غير موجود.")
+    duplicate = db.scalar(select(Product).where(Product.name == name.strip(), Product.id != product_id))
+    if duplicate:
+        raise HTTPException(status_code=400, detail="يوجد صنف آخر بنفس الاسم.")
+    unit_list = [x.strip() for x in units.replace("،", ",").split(",") if x.strip()]
+    if not unit_list:
+        raise HTTPException(status_code=400, detail="أضف وحدة واحدة على الأقل.")
+    before = {"name": product.name, "units": product.units_json, "active": product.active}
+    product.name = name.strip()
+    product.units_json = json.dumps(unit_list, ensure_ascii=False)
+    product.active = active == "true"
+    db.commit()
+    audit(db, "UPDATE_PRODUCT", user["username"], details={"before": before, "product_id": product_id})
+    return {"ok": True}
+
+
+@app.post("/api/products/{product_id}/toggle")
+def toggle_product(product_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_permission(request, db, "manage_products")
+    product = db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="الصنف غير موجود.")
+    product.active = not product.active
+    db.commit()
+    audit(db, "TOGGLE_PRODUCT", user["username"], details={"product_id": product_id, "active": product.active})
+    return {"ok": True, "active": product.active}
+
+
+@app.post("/api/products/{product_id}/delete")
+def delete_product(product_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_permission(request, db, "manage_products")
+    product = db.get(Product, product_id)
+    if not product:
+        raise HTTPException(status_code=404, detail="الصنف غير موجود.")
+    used = db.scalar(select(InvoiceIssueItem.id).where(InvoiceIssueItem.product_id == product_id).limit(1))
+    if used:
+        product.active = False
+        db.commit()
+        audit(db, "DEACTIVATE_USED_PRODUCT", user["username"], details={"product_id": product_id})
+        return {"ok": True, "deactivated": True, "message": "الصنف مستخدم سابقًا، لذلك تم تعطيله بدل حذفه."}
+    db.delete(product)
+    db.commit()
+    audit(db, "DELETE_PRODUCT", user["username"], details={"product_id": product_id})
+    return {"ok": True, "deleted": True}
+
+
+@app.post("/api/vehicles/{vehicle_id}/update")
+def update_vehicle(
+    vehicle_id: int,
+    request: Request,
+    name: str = Form(...),
+    plate_no: str = Form(...),
+    vehicle_type: str = Form(""),
+    status: str = Form("AVAILABLE"),
+    notes: str = Form(""),
+    active: str = Form("true"),
+    db: Session = Depends(get_db),
+):
+    user = require_permission(request, db, "manage_vehicles")
+    vehicle = db.get(Vehicle, vehicle_id)
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="السيارة غير موجودة.")
+    duplicate = db.scalar(select(Vehicle).where(Vehicle.plate_no == plate_no.strip(), Vehicle.id != vehicle_id))
+    if duplicate:
+        raise HTTPException(status_code=400, detail="رقم اللوحة مستخدم في سيارة أخرى.")
+    before = {"name": vehicle.name, "plate_no": vehicle.plate_no, "status": vehicle.status, "active": vehicle.active}
+    vehicle.name = name.strip()
+    vehicle.plate_no = plate_no.strip()
+    vehicle.vehicle_type = vehicle_type.strip() or None
+    vehicle.status = status
+    vehicle.notes = notes.strip() or None
+    vehicle.active = active == "true"
+    db.commit()
+    audit(db, "UPDATE_VEHICLE", user["username"], details={"before": before, "vehicle_id": vehicle_id})
+    return {"ok": True}
+
+
+@app.post("/api/vehicles/{vehicle_id}/toggle")
+def toggle_vehicle(vehicle_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_permission(request, db, "manage_vehicles")
+    vehicle = db.get(Vehicle, vehicle_id)
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="السيارة غير موجودة.")
+    vehicle.active = not vehicle.active
+    db.commit()
+    audit(db, "TOGGLE_VEHICLE", user["username"], details={"vehicle_id": vehicle_id, "active": vehicle.active})
+    return {"ok": True, "active": vehicle.active}
+
+
+@app.post("/api/vehicles/{vehicle_id}/delete")
+def delete_vehicle(vehicle_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_permission(request, db, "manage_vehicles")
+    vehicle = db.get(Vehicle, vehicle_id)
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="السيارة غير موجودة.")
+    used = db.scalar(select(Invoice.id).where(Invoice.vehicle_id == vehicle_id).limit(1))
+    if used:
+        vehicle.active = False
+        db.commit()
+        audit(db, "DEACTIVATE_USED_VEHICLE", user["username"], details={"vehicle_id": vehicle_id})
+        return {"ok": True, "deactivated": True, "message": "السيارة مستخدمة في فواتير سابقة، لذلك تم تعطيلها بدل حذفها."}
+    db.delete(vehicle)
+    db.commit()
+    audit(db, "DELETE_VEHICLE", user["username"], details={"vehicle_id": vehicle_id})
+    return {"ok": True, "deleted": True}
+
+
+@app.post("/api/users/{username}/toggle")
+def toggle_user(username: str, request: Request, db: Session = Depends(get_db)):
+    admin = require_permission(request, db, "manage_users")
+    if username == "admin":
+        raise HTTPException(status_code=400, detail="لا يمكن تعطيل المدير الرئيسي.")
+    user = db.scalar(select(User).where(User.username == username))
+    if not user:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود.")
+    user.active = not user.active
+    db.commit()
+    audit(db, "TOGGLE_USER", admin["username"], details={"user": username, "active": user.active})
+    return {"ok": True, "active": user.active}
+
+
+@app.post("/api/users/{username}/delete")
+def delete_user(username: str, request: Request, db: Session = Depends(get_db)):
+    admin = require_permission(request, db, "manage_users")
+    if username == "admin":
+        raise HTTPException(status_code=400, detail="لا يمكن حذف المدير الرئيسي.")
+    user = db.scalar(select(User).where(User.username == username))
+    if not user:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود.")
+    # Preserve historical audit/invoice references: deactivate instead of destructive deletion.
+    user.active = False
+    db.commit()
+    audit(db, "DEACTIVATE_USER", admin["username"], details={"user": username})
+    return {"ok": True, "deactivated": True}

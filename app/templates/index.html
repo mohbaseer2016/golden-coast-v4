@@ -48,6 +48,15 @@
         <div class="toolbar">
           <button id="newInvoiceBtn" class="success hidden">+ إدخال فاتورة</button>
           <button id="refreshBtn">تحديث</button>
+          <input id="queueFilter" placeholder="بحث في الفواتير المعلقة">
+          <select id="queueSort">
+            <option value="invoice_no">رقم الفاتورة</option>
+            <option value="customer">العميل</option>
+            <option value="driver_name">السائق</option>
+            <option value="status">الحالة</option>
+            <option value="invoice_date">تاريخ الفاتورة</option>
+            <option value="loaded_at">تاريخ التحميل</option>
+          </select>
         </div>
         <div class="card">
           <h2>الفواتير المعلقة عندك</h2>
@@ -64,6 +73,23 @@
         <div class="toolbar">
           <input id="searchInput" placeholder="رقم الفاتورة أو اسم العميل">
           <label class="inline"><input id="includeClosed" type="checkbox"> يشمل المكتملة</label>
+          <select id="searchStatusFilter">
+            <option value="">كل الحالات</option>
+            <option value="WAREHOUSE_PENDING">عند المخزن</option>
+            <option value="DRIVER_PENDING">مع السائق</option>
+            <option value="POSTPONED">مؤجلة</option>
+            <option value="RETURN_PENDING">مرتجع للمخزن</option>
+            <option value="DOCUMENT_PENDING">عند الموارد</option>
+            <option value="CLOSED">مكتملة</option>
+          </select>
+          <select id="searchSort">
+            <option value="invoice_no">رقم الفاتورة</option>
+            <option value="customer">العميل</option>
+            <option value="driver_name">السائق</option>
+            <option value="status">الحالة</option>
+            <option value="invoice_date">تاريخ الفاتورة</option>
+            <option value="loaded_at">تاريخ التحميل</option>
+          </select>
           <button id="searchBtn">بحث</button>
         </div>
         <div class="card table-wrap">
@@ -75,7 +101,13 @@
       </section>
 
       <section id="usersSection" class="hidden">
-        <div class="toolbar"><button id="newUserBtn" class="success">+ مستخدم جديد</button></div>
+        <div class="toolbar">
+  <button id="newUserBtn" class="success">+ مستخدم جديد</button>
+  <input id="usersFilter" placeholder="بحث: اسم، مستخدم، دور، جوال">
+  <select id="usersRoleFilter"><option value="">كل الأدوار</option><option value="ADMIN">إدارة</option><option value="HR">موارد</option><option value="WAREHOUSE">مخزن</option><option value="DRIVER">سائق</option></select>
+  <select id="usersStatusFilter"><option value="">الكل</option><option value="active">فعال</option><option value="inactive">موقوف</option></select>
+  <select id="usersSort"><option value="name">الاسم</option><option value="username">اسم المستخدم</option><option value="role">الدور</option></select>
+</div>
         <div class="card table-wrap">
           <table>
             <thead><tr><th>المستخدم</th><th>الاسم</th><th>الدور</th><th>رمز السائق</th><th>الجوال</th><th>الحالة</th></tr></thead>
@@ -87,10 +119,13 @@
       <section id="vehiclesSection" class="hidden">
         <div class="toolbar">
           <button id="newVehicleBtn" class="success">+ إضافة سيارة</button>
+          <input id="vehiclesFilter" placeholder="بحث: السيارة، اللوحة، النوع">
+          <select id="vehiclesStatusFilter"><option value="">كل الحالات</option><option value="AVAILABLE">متاحة</option><option value="MISSION">في مهمة</option><option value="MAINTENANCE">صيانة</option><option value="STOPPED">موقوفة</option></select>
+          <select id="vehiclesSort"><option value="name">السيارة</option><option value="plate_no">اللوحة</option><option value="status">الحالة</option></select>
         </div>
         <div class="card table-wrap">
           <table>
-            <thead><tr><th>السيارة</th><th>اللوحة</th><th>النوع</th><th>الحالة</th><th>ملاحظات</th></tr></thead>
+            <thead><tr><th>السيارة</th><th>اللوحة</th><th>النوع</th><th>الحالة</th><th>ملاحظات</th><th>إجراءات</th></tr></thead>
             <tbody id="vehiclesBody"></tbody>
           </table>
         </div>
@@ -99,13 +134,22 @@
 
 
       <section id="productsSection" class="hidden">
-        <div class="toolbar"><button id="newProductBtn" class="success">+ إضافة صنف</button></div>
+        <div class="toolbar">
+  <button id="newProductBtn" class="success">+ إضافة صنف</button>
+  <input id="productsFilter" placeholder="بحث في الأصناف أو الوحدات">
+  <select id="productsStatusFilter"><option value="">الكل</option><option value="active">فعال</option><option value="inactive">موقوف</option></select>
+  <select id="productsSort"><option value="name">اسم الصنف</option><option value="active">الحالة</option></select>
+</div>
         <div class="card table-wrap">
-          <table><thead><tr><th>الصنف</th><th>الوحدات</th></tr></thead><tbody id="productsBody"></tbody></table>
+          <table><thead><tr><th>الصنف</th><th>الوحدات</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody id="productsBody"></tbody></table>
         </div>
       </section>
 
       <section id="logsSection" class="hidden">
+        <div class="toolbar">
+          <input id="logsFilter" placeholder="بحث: مستخدم، حركة، فاتورة">
+          <select id="logsSort"><option value="created_at">الأحدث</option><option value="username">المستخدم</option><option value="action">الحركة</option><option value="invoice_no">الفاتورة</option></select>
+        </div>
         <div class="card table-wrap">
           <table>
             <thead><tr><th>الوقت</th><th>المستخدم</th><th>الحركة</th><th>الفاتورة</th><th>التفاصيل</th><th></th></tr></thead>
