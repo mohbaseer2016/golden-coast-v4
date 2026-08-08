@@ -17,6 +17,31 @@ class User(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_external_driver: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    permissions_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Product(Base):
+    __tablename__ = "products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(180), unique=True, index=True)
+    units_json: Mapped[str] = mapped_column(Text, default="[]")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class InvoiceIssueItem(Base):
+    __tablename__ = "invoice_issue_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    invoice_no: Mapped[str] = mapped_column(String(100), index=True)
+    stage: Mapped[str] = mapped_column(String(40), index=True)  # WAREHOUSE / DRIVER
+    issue_type: Mapped[str] = mapped_column(String(40), index=True)  # ناقص / مرتجع
+    product_id: Mapped[int] = mapped_column(Integer, index=True)
+    product_name: Mapped[str] = mapped_column(String(180))
+    unit: Mapped[str] = mapped_column(String(80))
+    quantity: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Vehicle(Base):
@@ -61,6 +86,7 @@ class Invoice(Base):
     driver_return_photo: Mapped[str | None] = mapped_column(String(255), nullable=True)
     driver_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     return_qty_declared: Mapped[float] = mapped_column(Float, default=0)
+    return_qty_text: Mapped[str | None] = mapped_column(String(180), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     return_received: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -11,12 +11,12 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
 from .drive_service import SupabaseStorage
-from .models import AuditLog, Invoice, User, Vehicle
+from .models import AuditLog, Invoice, User, Vehicle, Product, InvoiceIssueItem
 from .security import clear_session, hash_password, require_role, require_user, set_session, verify_password
 
 APP_DIR = Path(__file__).resolve().parent
@@ -25,6 +25,66 @@ UPLOAD_DIR = ROOT_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 ROLES = {"ADMIN", "HR", "WAREHOUSE", "DRIVER"}
+
+PERMISSION_CATALOG = {
+    "screens": {
+        "queue": "المعلقة عندي", "search": "البحث والأرشيف", "users": "المستخدمون",
+        "vehicles": "السيارات", "products": "الأصناف", "logs": "الحركات"
+    },
+    "actions": {
+        "invoice_create": "إضافة فاتورة", "invoice_edit": "تعديل فاتورة",
+        "invoice_delete": "حذف فاتورة", "warehouse_approve": "اعتماد المخزن",
+        "driver_approve": "اعتماد السائق", "return_approve": "استلام المرتجع",
+        "close_invoice": "إغلاق الفاتورة", "manage_users": "إدارة المستخدمين والصلاحيات",
+        "manage_vehicles": "إدارة السيارات", "manage_products": "إدارة الأصناف"
+    }
+}
+
+ROLE_DEFAULTS = {
+    "ADMIN": {"screens": list(PERMISSION_CATALOG["screens"]), "actions": list(PERMISSION_CATALOG["actions"])},
+    "HR": {"screens": ["queue","search"], "actions": ["invoice_create","invoice_edit","close_invoice"]},
+    "WAREHOUSE": {"screens": ["queue","search"], "actions": ["warehouse_approve","return_approve"]},
+    "DRIVER": {"screens": ["queue","search"], "actions": ["driver_approve"]},
+}
+
+def effective_permissions(user_row: User | None, session_user: dict) -> dict:
+    if session_user.get("username") == "admin":
+        return ROLE_DEFAULTS["ADMIN"]
+    defaults = ROLE_DEFAULTS.get(session_user.get("role"), {"screens": [], "actions": []})
+    if not user_row or not user_row.permissions_json:
+        return defaults
+    try:
+        custom = json.loads(user_row.permissions_json)
+        return {"screens": custom.get("screens", []), "actions": custom.get("actions", [])}
+    except Exception:
+        return defaults
+
+def require_permission(request: Request, db: Session, permission: str):
+    session_user = require_user(request)
+    row = db.scalar(select(User).where(User.username == session_user["username"]))
+    perms = effective_permissions(row, session_user)
+    if session_user.get("username") != "admin" and permission not in perms["actions"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية تنفيذ هذه العملية.")
+    return session_user
+
+def ensure_columns():
+    """Lightweight migration for existing Supabase/Postgres and local SQLite databases."""
+    with engine.begin() as conn:
+        dialect = engine.dialect.name
+        stmts = []
+        if dialect == "postgresql":
+            stmts = [
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions_json TEXT",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS return_qty_text VARCHAR(180)",
+            ]
+        elif dialect == "sqlite":
+            cols_u = {r[1] for r in conn.execute(text("PRAGMA table_info(users)"))}
+            cols_i = {r[1] for r in conn.execute(text("PRAGMA table_info(invoices)"))}
+            if "permissions_json" not in cols_u: stmts.append("ALTER TABLE users ADD COLUMN permissions_json TEXT")
+            if "return_qty_text" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN return_qty_text VARCHAR(180)")
+        for stmt in stmts:
+            conn.execute(text(stmt))
+
 
 app = FastAPI(title="منصة جولدن كوست لإدارة العمليات")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
@@ -89,6 +149,7 @@ def upsert_user(db: Session, username: str, password: str, name: str, role: str,
 @app.on_event("startup")
 def startup():
     Base.metadata.create_all(engine)
+    ensure_columns()
     with Session(engine) as db:
         upsert_user(db, "admin", "62420071", "المدير", "ADMIN")
         upsert_user(db, "hr1", "123321", "فؤاد حاجب", "HR")
@@ -137,6 +198,7 @@ def user_dict(user: User):
         "phone": user.phone,
         "active": user.active,
         "is_external_driver": user.is_external_driver,
+        "permissions": effective_permissions(user, {"username": user.username, "role": user.role}),
     }
 
 
@@ -169,6 +231,10 @@ def invoice_dict(invoice: Invoice):
         "receipt_photo": invoice.receipt_photo,
         "driver_return_photo": invoice.driver_return_photo,
         "return_qty_declared": invoice.return_qty_declared,
+        "return_qty_text": invoice.return_qty_text,
+        "invoice_date": invoice.invoice_date.isoformat() if invoice.invoice_date else None,
+        "loaded_at": invoice.loaded_at.isoformat() if invoice.loaded_at else None,
+        "delivered_at": invoice.delivered_at.isoformat() if invoice.delivered_at else None,
         "return_received": invoice.return_received,
         "return_qty_actual": invoice.return_qty_actual,
         "return_difference": invoice.return_difference,
@@ -259,6 +325,10 @@ def bootstrap(request: Request, db: Session = Depends(get_db)):
         "vehicles": list_vehicles(db),
         "users": list_users(db) if user["role"] == "ADMIN" else [],
         "logs": list_logs(db) if user["role"] == "ADMIN" else [],
+        "products": [{"id": p.id, "name": p.name, "units": json.loads(p.units_json or "[]"), "active": p.active}
+                     for p in db.scalars(select(Product).where(Product.active == True).order_by(Product.name)).all()],
+        "permission_catalog": PERMISSION_CATALOG,
+        "permissions": effective_permissions(db.scalar(select(User).where(User.username == user["username"])), user),
     }
 
 
@@ -267,16 +337,18 @@ def create_invoice(
     request: Request,
     invoice_no: str = Form(...),
     customer: str = Form(""),
+    invoice_date: str = Form(""),
     notes: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    user = require_role(request, ["ADMIN", "HR"])
+    user = require_permission(request, db, "invoice_create")
     invoice_no = invoice_no.strip()
     if db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no)):
         raise HTTPException(status_code=400, detail="رقم الفاتورة موجود مسبقًا.")
     db.add(Invoice(
         invoice_no=invoice_no,
         customer=customer.strip() or None,
+        invoice_date=datetime.fromisoformat(invoice_date) if invoice_date else datetime.utcnow(),
         hr_notes=notes.strip() or None,
         created_by=user["username"],
         updated_by=user["username"],
@@ -323,14 +395,16 @@ def warehouse_update(
     invoice_no: str,
     request: Request,
     driver_code: str = Form(...),
-    vehicle_id: int = Form(...),
+    vehicle_id: int | None = Form(None),
     load_status: str = Form(...),
     shortage_reason: str = Form(""),
     notes: str = Form(""),
+    loaded_at: str = Form(""),
+    issues_json: str = Form("[]"),
     photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    user = require_role(request, ["ADMIN", "WAREHOUSE"])
+    user = require_permission(request, db, "warehouse_approve")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or invoice.status != "WAREHOUSE_PENDING":
         raise HTTPException(status_code=400, detail="الفاتورة ليست معلقة في المخزن.")
@@ -340,21 +414,33 @@ def warehouse_update(
         User.role == "DRIVER",
         User.active == True,
     ))
-    vehicle = db.get(Vehicle, vehicle_id)
+    vehicle = db.get(Vehicle, vehicle_id) if vehicle_id else None
     if not driver:
         raise HTTPException(status_code=400, detail="اختر سائقًا.")
-    if not vehicle or not vehicle.active:
-        raise HTTPException(status_code=400, detail="اختر سيارة.")
+    if not driver.is_external_driver and (not vehicle or not vehicle.active):
+        raise HTTPException(status_code=400, detail="اختيار الدينة إجباري لسائق الشركة.")
 
     invoice.driver_code = driver.driver_code or ""
     invoice.driver_name = driver.name
     invoice.is_external_driver = driver.is_external_driver
-    invoice.vehicle_no = f"{vehicle.name} - {vehicle.plate_no}"
+    invoice.vehicle_no = None if driver.is_external_driver else f"{vehicle.name} - {vehicle.plate_no}"
     invoice.load_status = load_status
     invoice.warehouse_shortage_reason = shortage_reason.strip() or None
     invoice.warehouse_notes = notes.strip() or None
     invoice.warehouse_photo = save_upload(photo, invoice_no, "warehouse") or invoice.warehouse_photo
-    invoice.loaded_at = datetime.utcnow()
+    invoice.loaded_at = datetime.fromisoformat(loaded_at) if loaded_at else datetime.utcnow()
+
+    db.query(InvoiceIssueItem).filter(InvoiceIssueItem.invoice_no == invoice_no, InvoiceIssueItem.stage == "WAREHOUSE").delete()
+    try:
+        issue_rows = json.loads(issues_json or "[]")
+    except Exception:
+        issue_rows = []
+    for row in issue_rows:
+        product = db.get(Product, int(row.get("product_id") or 0))
+        if product and row.get("quantity"):
+            db.add(InvoiceIssueItem(invoice_no=invoice_no, stage="WAREHOUSE",
+                issue_type=row.get("issue_type") or "ناقص", product_id=product.id,
+                product_name=product.name, unit=row.get("unit") or "", quantity=str(row.get("quantity"))))
 
     if load_status == "مرفوض من المخزن":
         invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
@@ -379,14 +465,15 @@ def driver_update(
     invoice_no: str,
     request: Request,
     delivery_result: str = Form(...),
-    return_qty_declared: float = Form(0),
+    return_qty_declared: str = Form(""),
     reason: str = Form(""),
     notes: str = Form(""),
+    issues_json: str = Form("[]"),
     receipt_photo: UploadFile | None = File(None),
     return_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    user = require_role(request, ["ADMIN", "DRIVER"])
+    user = require_permission(request, db, "driver_approve")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or invoice.status not in ["DRIVER_PENDING", "POSTPONED"]:
         raise HTTPException(status_code=400, detail="الفاتورة ليست مع السائق.")
@@ -403,10 +490,22 @@ def driver_update(
     invoice.delivery_result = delivery_result
     invoice.delivery_reason = reason.strip() or None
     invoice.driver_notes = notes.strip() or None
-    invoice.return_qty_declared = return_qty_declared
+    invoice.return_qty_text = return_qty_declared.strip() or None
     invoice.receipt_photo = receipt or invoice.receipt_photo
     invoice.driver_return_photo = returned or invoice.driver_return_photo
     invoice.delivered_at = datetime.utcnow()
+
+    db.query(InvoiceIssueItem).filter(InvoiceIssueItem.invoice_no == invoice_no, InvoiceIssueItem.stage == "DRIVER").delete()
+    try:
+        issue_rows = json.loads(issues_json or "[]")
+    except Exception:
+        issue_rows = []
+    for row in issue_rows:
+        product = db.get(Product, int(row.get("product_id") or 0))
+        if product and row.get("quantity"):
+            db.add(InvoiceIssueItem(invoice_no=invoice_no, stage="DRIVER", issue_type="مرتجع",
+                product_id=product.id, product_name=product.name, unit=row.get("unit") or "",
+                quantity=str(row.get("quantity"))))
 
     if delivery_result == "تم كامل":
         invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
@@ -425,27 +524,25 @@ def driver_update(
 def return_update(
     invoice_no: str,
     request: Request,
-    return_qty_actual: float = Form(...),
+    return_qty_actual: str = Form(""),
     condition: str = Form(""),
     notes: str = Form(""),
     photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    user = require_role(request, ["ADMIN", "WAREHOUSE"])
+    user = require_permission(request, db, "return_approve")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or invoice.status != "RETURN_PENDING":
         raise HTTPException(status_code=400, detail="لا يوجد مرتجع.")
 
-    difference = float(invoice.return_qty_declared or 0) - return_qty_actual
-    if abs(difference) > 1e-9:
-        raise HTTPException(status_code=400, detail=f"فرق الكمية: {difference}")
+    difference = 0
 
     image = save_upload(photo, invoice_no, "return_warehouse")
     if not image:
         raise HTTPException(status_code=400, detail="صورة المرتجع مطلوبة.")
 
     invoice.return_received = True
-    invoice.return_qty_actual = return_qty_actual
+    invoice.return_qty_actual = 0
     invoice.return_difference = difference
     invoice.return_condition = condition.strip() or None
     invoice.return_notes = notes.strip() or None
@@ -467,7 +564,7 @@ def close_invoice(
     external_receipt: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
-    user = require_role(request, ["ADMIN", "HR"])
+    user = require_permission(request, db, "close_invoice")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or invoice.status != "DOCUMENT_PENDING":
         raise HTTPException(status_code=400, detail="الفاتورة ليست عند الموارد.")
@@ -490,6 +587,68 @@ def close_invoice(
     return {"ok": True}
 
 
+
+@app.get("/api/dashboard/{bucket}")
+def dashboard_bucket(bucket: str, request: Request, db: Session = Depends(get_db)):
+    user = require_user(request)
+    mapping = {
+        "warehouse": ["WAREHOUSE_PENDING"], "drivers": ["DRIVER_PENDING","POSTPONED"],
+        "returns": ["RETURN_PENDING"], "documents": ["DOCUMENT_PENDING"], "closed": ["CLOSED"]
+    }
+    statuses = mapping.get(bucket)
+    if not statuses:
+        raise HTTPException(status_code=404, detail="القائمة غير موجودة.")
+    stmt = select(Invoice).where(Invoice.status.in_(statuses))
+    if user["role"] == "DRIVER":
+        stmt = stmt.where(Invoice.driver_code == user.get("driver_code",""))
+    return [invoice_dict(x) for x in db.scalars(stmt.order_by(Invoice.created_at.desc())).all()]
+
+
+@app.get("/api/invoices/{invoice_no}/issues")
+def invoice_issues(invoice_no: str, request: Request, db: Session = Depends(get_db)):
+    require_user(request)
+    rows = db.scalars(select(InvoiceIssueItem).where(InvoiceIssueItem.invoice_no == invoice_no).order_by(InvoiceIssueItem.id)).all()
+    return [{"id":x.id,"stage":x.stage,"issue_type":x.issue_type,"product_id":x.product_id,
+             "product_name":x.product_name,"unit":x.unit,"quantity":x.quantity} for x in rows]
+
+
+@app.post("/api/products")
+def create_product(request: Request, name: str = Form(...), units: str = Form(...), db: Session = Depends(get_db)):
+    user = require_permission(request, db, "manage_products")
+    name = name.strip()
+    if db.scalar(select(Product).where(Product.name == name)):
+        raise HTTPException(status_code=400, detail="الصنف موجود مسبقًا.")
+    unit_list = [x.strip() for x in units.replace("،", ",").split(",") if x.strip()]
+    if not unit_list:
+        raise HTTPException(status_code=400, detail="أضف وحدة واحدة على الأقل.")
+    db.add(Product(name=name, units_json=json.dumps(unit_list, ensure_ascii=False), active=True))
+    db.commit()
+    audit(db, "CREATE_PRODUCT", user["username"], details={"product":name,"units":unit_list})
+    return {"ok": True}
+
+
+@app.post("/api/users/{username}/permissions")
+def update_permissions(username: str, request: Request, permissions_json: str = Form(...), db: Session = Depends(get_db)):
+    admin = require_permission(request, db, "manage_users")
+    if username == "admin":
+        raise HTTPException(status_code=400, detail="صلاحيات المدير الرئيسي ثابتة ولا يمكن تقييدها.")
+    row = db.scalar(select(User).where(User.username == username))
+    if not row:
+        raise HTTPException(status_code=404, detail="المستخدم غير موجود.")
+    try:
+        data = json.loads(permissions_json)
+    except Exception:
+        raise HTTPException(status_code=400, detail="بيانات الصلاحيات غير صحيحة.")
+    allowed_s = set(PERMISSION_CATALOG["screens"])
+    allowed_a = set(PERMISSION_CATALOG["actions"])
+    data = {"screens":[x for x in data.get("screens",[]) if x in allowed_s],
+            "actions":[x for x in data.get("actions",[]) if x in allowed_a]}
+    row.permissions_json = json.dumps(data, ensure_ascii=False)
+    db.commit()
+    audit(db, "UPDATE_PERMISSIONS", admin["username"], details={"user":username})
+    return {"ok": True}
+
+
 @app.post("/api/vehicles")
 def create_vehicle(
     request: Request,
@@ -500,7 +659,7 @@ def create_vehicle(
     notes: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    user = require_role(request, ["ADMIN"])
+    user = require_permission(request, db, "manage_vehicles")
     if db.scalar(select(Vehicle).where(Vehicle.plate_no == plate_no.strip())):
         raise HTTPException(status_code=400, detail="رقم اللوحة موجود.")
     db.add(Vehicle(
@@ -527,7 +686,7 @@ def create_user(
     phone: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    admin = require_role(request, ["ADMIN"])
+    admin = require_permission(request, db, "manage_users")
     username = username.lower().strip()
     if db.scalar(select(User).where(User.username == username)):
         raise HTTPException(status_code=400, detail="اسم المستخدم موجود.")
@@ -558,7 +717,7 @@ def update_user(
     password: str = Form(""),
     db: Session = Depends(get_db),
 ):
-    admin = require_role(request, ["ADMIN"])
+    admin = require_permission(request, db, "manage_users")
     user = db.scalar(select(User).where(User.username == username))
     if not user:
         raise HTTPException(status_code=404, detail="المستخدم غير موجود.")
