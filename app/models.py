@@ -41,6 +41,9 @@ class InvoiceIssueItem(Base):
     product_name: Mapped[str] = mapped_column(String(180))
     unit: Mapped[str] = mapped_column(String(80))
     quantity: Mapped[str] = mapped_column(String(80))
+    warehouse_match: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    actual_quantity: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    warehouse_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 

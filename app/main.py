@@ -83,10 +83,14 @@ def ensure_columns():
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_reviewed_by VARCHAR(80)",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_reviewed_at TIMESTAMP",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_notes TEXT",
+                "ALTER TABLE invoice_issue_items ADD COLUMN IF NOT EXISTS warehouse_match BOOLEAN",
+                "ALTER TABLE invoice_issue_items ADD COLUMN IF NOT EXISTS actual_quantity VARCHAR(80)",
+                "ALTER TABLE invoice_issue_items ADD COLUMN IF NOT EXISTS warehouse_note TEXT",
             ]
         elif dialect == "sqlite":
             cols_u = {r[1] for r in conn.execute(text("PRAGMA table_info(users)"))}
             cols_i = {r[1] for r in conn.execute(text("PRAGMA table_info(invoices)"))}
+            cols_ii = {r[1] for r in conn.execute(text("PRAGMA table_info(invoice_issue_items)"))}
             if "permissions_json" not in cols_u: stmts.append("ALTER TABLE users ADD COLUMN permissions_json TEXT")
             if "return_qty_text" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN return_qty_text VARCHAR(180)")
             if "delivery_mode" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN delivery_mode VARCHAR(30)")
@@ -95,6 +99,9 @@ def ensure_columns():
             if "sales_return_reviewed_by" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_reviewed_by VARCHAR(80)")
             if "sales_return_reviewed_at" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_reviewed_at DATETIME")
             if "sales_return_notes" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_notes TEXT")
+            if "warehouse_match" not in cols_ii: stmts.append("ALTER TABLE invoice_issue_items ADD COLUMN warehouse_match BOOLEAN")
+            if "actual_quantity" not in cols_ii: stmts.append("ALTER TABLE invoice_issue_items ADD COLUMN actual_quantity VARCHAR(80)")
+            if "warehouse_note" not in cols_ii: stmts.append("ALTER TABLE invoice_issue_items ADD COLUMN warehouse_note TEXT")
         for stmt in stmts:
             conn.execute(text(stmt))
 
@@ -495,63 +502,111 @@ def warehouse_update(
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or invoice.status != "WAREHOUSE_PENDING":
         raise HTTPException(status_code=400, detail="الفاتورة ليست معلقة في المخزن.")
+
+    if delivery_mode not in ["COMPANY_DRIVER", "EXTERNAL_DRIVER", "CUSTOMER_SELF"]:
+        raise HTTPException(status_code=400, detail="طريقة التوصيل غير صحيحة.")
+
     driver = None
+    vehicle = None
+
     if delivery_mode in ["COMPANY_DRIVER", "EXTERNAL_DRIVER"]:
-        driver = db.scalar(select(User).where(User.driver_code == driver_code, User.role == "DRIVER", User.active == True))
-        if not driver:
+        if not driver_code:
             raise HTTPException(status_code=400, detail="اختر السائق.")
-        raise HTTPException(status_code=400, detail="اختر سائقًا.")
-    if delivery_mode == "COMPANY_DRIVER" and (not vehicle or not vehicle.active):
-        raise HTTPException(status_code=400, detail="اختيار الدينة إجباري لسائق الشركة.")
+        driver = db.scalar(
+            select(User).where(
+                User.driver_code == driver_code,
+                User.role == "DRIVER",
+                User.active == True,
+            )
+        )
+        if not driver:
+            raise HTTPException(status_code=400, detail="السائق غير موجود أو موقوف.")
+
+    if delivery_mode == "COMPANY_DRIVER":
+        if not vehicle_id:
+            raise HTTPException(status_code=400, detail="اختيار الدينة إجباري لسائق الشركة.")
+        vehicle = db.get(Vehicle, vehicle_id)
+        if not vehicle or not vehicle.active:
+            raise HTTPException(status_code=400, detail="السيارة غير موجودة أو موقوفة.")
+
+    customer_self_receipt = None
+    if delivery_mode == "CUSTOMER_SELF":
+        customer_self_receipt = save_upload(receipt_photo, invoice_no, "receipt_customer_self")
+        if not customer_self_receipt:
+            raise HTTPException(
+                status_code=400,
+                detail="صورة الاستلام إجبارية عندما يستلم العميل البضاعة بنفسه.",
+            )
 
     invoice.delivery_mode = delivery_mode
-    invoice.driver_code = driver.driver_code if driver else "CUSTOMER_SELF" or ""
+    invoice.driver_code = driver.driver_code if driver else "CUSTOMER_SELF"
     invoice.driver_name = driver.name if driver else "العميل نفسه"
-    invoice.is_external_driver = (delivery_mode == "EXTERNAL_DRIVER")
-    invoice.vehicle_no = f"{vehicle.name} - {vehicle.plate_no}" if delivery_mode == "COMPANY_DRIVER" and vehicle else None
+    invoice.is_external_driver = delivery_mode == "EXTERNAL_DRIVER"
+    invoice.vehicle_no = (
+        f"{vehicle.name} - {vehicle.plate_no}"
+        if delivery_mode == "COMPANY_DRIVER" and vehicle
+        else None
+    )
+
     invoice.load_status = load_status
     invoice.warehouse_shortage_reason = shortage_reason.strip() or None
     invoice.warehouse_notes = notes.strip() or None
     invoice.warehouse_photo = save_upload(photo, invoice_no, "warehouse") or invoice.warehouse_photo
     invoice.loaded_at = datetime.fromisoformat(loaded_at) if loaded_at else datetime.utcnow()
-    customer_self_receipt = save_upload(receipt_photo, invoice_no, "receipt_customer_self")
-    if delivery_mode == "CUSTOMER_SELF" and not customer_self_receipt:
-        raise HTTPException(status_code=400, detail="صورة الاستلام إجبارية عندما يستلم العميل البضاعة بنفسه.")
     if customer_self_receipt:
         invoice.receipt_photo = customer_self_receipt
+        invoice.delivery_result = "استلم العميل بنفسه"
 
-    db.query(InvoiceIssueItem).filter(InvoiceIssueItem.invoice_no == invoice_no, InvoiceIssueItem.stage == "WAREHOUSE").delete()
+    db.query(InvoiceIssueItem).filter(
+        InvoiceIssueItem.invoice_no == invoice_no,
+        InvoiceIssueItem.stage == "WAREHOUSE",
+    ).delete()
+
     try:
         issue_rows = json.loads(issues_json or "[]")
     except Exception:
         issue_rows = []
+
     for row in issue_rows:
         product = db.get(Product, int(row.get("product_id") or 0))
         if product and row.get("quantity"):
-            db.add(InvoiceIssueItem(invoice_no=invoice_no, stage="WAREHOUSE",
-                issue_type=row.get("issue_type") or "ناقص", product_id=product.id,
-                product_name=product.name, unit=row.get("unit") or "", quantity=str(row.get("quantity"))))
+            db.add(
+                InvoiceIssueItem(
+                    invoice_no=invoice_no,
+                    stage="WAREHOUSE",
+                    issue_type=row.get("issue_type") or "ناقص",
+                    product_id=product.id,
+                    product_name=product.name,
+                    unit=row.get("unit") or "",
+                    quantity=str(row.get("quantity")),
+                )
+            )
 
     if load_status == "مرفوض من المخزن":
         invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
-    elif driver.is_external_driver:
+    elif delivery_mode == "COMPANY_DRIVER":
+        invoice.status, invoice.current_owner = "DRIVER_PENDING", "DRIVER"
+    elif delivery_mode == "EXTERNAL_DRIVER":
         invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
         invoice.delivery_result = "سائق خارجي — بانتظار إرسال الاستلام للموارد"
-    else:
-        invoice.status, invoice.current_owner = (
-            ("DRIVER_PENDING", "DRIVER") if delivery_mode == "COMPANY_DRIVER"
-            else ("DOCUMENT_PENDING", "HR")
-        )
+    else:  # CUSTOMER_SELF
+        invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
 
     invoice.updated_by = user["username"]
     db.commit()
-    audit(db, "WAREHOUSE_UPDATE", user["username"], invoice_no, {
-        "driver": driver.name,
-        "vehicle": invoice.vehicle_no,
-        "load_status": load_status,
-    })
+    audit(
+        db,
+        "WAREHOUSE_UPDATE",
+        user["username"],
+        invoice_no,
+        {
+            "delivery_mode": delivery_mode,
+            "driver": driver.name if driver else "العميل نفسه",
+            "vehicle": invoice.vehicle_no,
+            "load_status": load_status,
+        },
+    )
     return {"ok": True}
-
 
 @app.post("/api/invoices/{invoice_no}/driver")
 def driver_update(
@@ -618,8 +673,7 @@ def driver_update(
 def return_update(
     invoice_no: str,
     request: Request,
-    return_qty_actual: str = Form(""),
-    condition: str = Form(""),
+    issue_results_json: str = Form("[]"),
     notes: str = Form(""),
     photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
@@ -627,29 +681,56 @@ def return_update(
     user = require_permission(request, db, "return_approve")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or invoice.status != "RETURN_PENDING":
-        raise HTTPException(status_code=400, detail="لا يوجد مرتجع.")
+        raise HTTPException(status_code=400, detail="لا يوجد مرتجع بانتظار المخزن.")
 
-    difference = 0
+    driver_items = db.scalars(
+        select(InvoiceIssueItem).where(
+            InvoiceIssueItem.invoice_no == invoice_no,
+            InvoiceIssueItem.stage == "DRIVER",
+            InvoiceIssueItem.issue_type == "مرتجع",
+        ).order_by(InvoiceIssueItem.id)
+    ).all()
+    if not driver_items:
+        raise HTTPException(status_code=400, detail="السائق لم يسجل أصناف مرتجع لهذه الفاتورة.")
 
+    try:
+        results = json.loads(issue_results_json or "[]")
+    except Exception:
+        raise HTTPException(status_code=400, detail="بيانات مطابقة المرتجع غير صحيحة.")
+    result_map = {int(x.get("id")): x for x in results if x.get("id")}
+
+    for item in driver_items:
+        result = result_map.get(item.id)
+        if not result or result.get("match") not in [True, False]:
+            raise HTTPException(status_code=400, detail=f"حدد هل الصنف «{item.product_name}» مطابق أم لا.")
+        item.warehouse_match = bool(result["match"])
+        if item.warehouse_match:
+            item.actual_quantity = item.quantity
+            item.warehouse_note = None
+        else:
+            actual = str(result.get("actual_quantity") or "").strip()
+            if not actual:
+                raise HTTPException(status_code=400, detail=f"اكتب الكمية المستلمة فعليًا للصنف «{item.product_name}».")
+            item.actual_quantity = actual
+            item.warehouse_note = str(result.get("note") or "").strip() or None
+
+    # صورة المرتجع داعمة للعملية لكنها ليست إجبارية، لأن العميل قد يثبت المرتجع
+    # في نفس صورة الاستلام. صورة الاستلام الأصلية تبقى محفوظة ويمكن مراجعتها.
     image = save_upload(photo, invoice_no, "return_warehouse")
-    if not image:
-        raise HTTPException(status_code=400, detail="صورة المرتجع مطلوبة.")
-
     invoice.return_received = True
-    invoice.return_qty_actual = 0
-    invoice.return_difference = difference
-    invoice.return_condition = condition.strip() or None
+    invoice.return_photo = image or invoice.return_photo
     invoice.return_notes = notes.strip() or None
-    invoice.return_photo = image
     invoice.return_received_at = datetime.utcnow()
     invoice.sales_return_required = True
     invoice.sales_return_reviewed = False
     invoice.status, invoice.current_owner = "FINAL_REVIEW_PENDING", "MULTI"
     invoice.updated_by = user["username"]
     db.commit()
-    audit(db, "RETURN_UPDATE", user["username"], invoice_no)
+    audit(db, "RETURN_UPDATE", user["username"], invoice_no, {
+        "items": [{"id":x.id,"product":x.product_name,"declared":x.quantity,
+                   "matched":x.warehouse_match,"actual":x.actual_quantity} for x in driver_items]
+    })
     return {"ok": True}
-
 
 
 @app.post("/api/invoices/{invoice_no}/external-delivery")
@@ -795,7 +876,9 @@ def invoice_issues(invoice_no: str, request: Request, db: Session = Depends(get_
     require_user(request)
     rows = db.scalars(select(InvoiceIssueItem).where(InvoiceIssueItem.invoice_no == invoice_no).order_by(InvoiceIssueItem.id)).all()
     return [{"id":x.id,"stage":x.stage,"issue_type":x.issue_type,"product_id":x.product_id,
-             "product_name":x.product_name,"unit":x.unit,"quantity":x.quantity} for x in rows]
+             "product_name":x.product_name,"unit":x.unit,"quantity":x.quantity,
+             "warehouse_match":x.warehouse_match,"actual_quantity":x.actual_quantity,
+             "warehouse_note":x.warehouse_note} for x in rows]
 
 
 @app.post("/api/products")

@@ -79,7 +79,15 @@ async function api(url, options={}) {
       document.getElementById('appView')?.classList.add('hidden');
       document.getElementById('loginView')?.classList.remove('hidden');
     }
-    throw new Error(data.detail || 'حدث خطأ');
+    let message = 'حدث خطأ';
+    if (typeof data?.detail === 'string') {
+      message = data.detail;
+    } else if (Array.isArray(data?.detail)) {
+      message = data.detail.map(x => x?.msg || x?.message || JSON.stringify(x)).join(' — ');
+    } else if (data?.detail && typeof data.detail === 'object') {
+      message = data.detail.msg || data.detail.message || JSON.stringify(data.detail);
+    }
+    throw new Error(message);
   }
   return data;
 }
@@ -188,8 +196,10 @@ async function openInvoice(invoiceNo) {
   }
 }
 
-function showInvoice(invoice) {
+async function showInvoice(invoice) {
   document.getElementById('modalTitle').textContent = 'فاتورة ' + invoice.invoice_no;
+  let invoiceIssues=[];
+  try { invoiceIssues=await api(`/api/invoices/${encodeURIComponent(invoice.invoice_no)}/issues`); } catch(e) {}
   let html = `<div class="card">
     <b>السائق:</b> ${esc(invoice.driver_name || 'لم يحدد')}<br>
     <b>السيارة:</b> ${esc(invoice.vehicle_no || 'لم تحدد')}<br>
@@ -207,7 +217,7 @@ function showInvoice(invoice) {
   if (['ADMIN','WAREHOUSE'].includes(state.user.role) && invoice.status === 'WAREHOUSE_PENDING') {
     html += warehouseForm();
   } else if (['ADMIN','WAREHOUSE'].includes(state.user.role) && invoice.status === 'RETURN_PENDING') {
-    html += returnForm(invoice);
+    html += returnForm(invoice, invoiceIssues);
   } else if (['ADMIN','DRIVER'].includes(state.user.role) && ['DRIVER_PENDING','POSTPONED'].includes(invoice.status)) {
     html += driverForm();
   } else if (['ADMIN','HR'].includes(state.user.role) && invoice.status === 'DOCUMENT_PENDING' && invoice.delivery_mode === 'EXTERNAL_DRIVER' && !invoice.receipt_photo) {
@@ -297,14 +307,34 @@ function externalDriverForm() {
   </form>`;
 }
 
-function returnForm(invoice) {
+function returnForm(invoice, allIssues=[]) {
+  const items=allIssues.filter(x=>x.stage==='DRIVER' && x.issue_type==='مرتجع');
+  const rows=items.length ? items.map(x=>`
+    <div class="return-check-row" data-id="${x.id}">
+      <div class="return-item-title"><b>${esc(x.product_name)}</b> — ${esc(x.quantity)} ${esc(x.unit||'')}</div>
+      <label>هل الكمية المستلمة مطابقة لما سجله السائق؟</label>
+      <select class="return-match" required>
+        <option value="">اختر</option>
+        <option value="yes">نعم، مطابق</option>
+        <option value="no">لا، يوجد اختلاف</option>
+      </select>
+      <div class="return-actual hidden">
+        <label>الكمية المستلمة فعليًا</label>
+        <input class="return-actual-qty" type="text" placeholder="اكتب الكمية الفعلية بنفس الوحدة">
+        <label>ملاحظة الاختلاف (اختياري)</label>
+        <input class="return-item-note" type="text">
+      </div>
+    </div>`).join('') :
+    '<div class="card">لا توجد أصناف مرتجع مسجلة من السائق. لا يمكن اعتماد المرتجع حتى يسجل السائق الأصناف.</div>';
+
   return `<form id="returnForm">
-    <label>الكمية المستلمة فعليًا</label>
-    <input name="return_qty_actual" type="number" step="0.01" value="${invoice.return_qty_declared}">
-    <label>حالة المرتجع</label><input name="condition">
-    <label>صورة المرتجع</label><input name="photo" type="file" accept="image/*">
-    <label>ملاحظات</label><textarea name="notes"></textarea>
-    <button>تأكيد</button>
+    <div class="card"><b>مطابقة مرتجع السائق</b><br>راجع كل صنف والكمية التي سجلها السائق، ثم أكد المطابقة أو اكتب الكمية الفعلية.</div>
+    <div id="returnCheckItems">${rows}</div>
+    <input type="hidden" name="issue_results_json" value="[]">
+    <label>صورة المرتجع (اختياري)</label>
+    <input name="photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
+    <label>ملاحظات المخزن</label><textarea name="notes"></textarea>
+    <button ${items.length?'':'disabled'}>تأكيد استلام المرتجع</button>
   </form>`;
 }
 
@@ -347,6 +377,12 @@ function finalReviewSummary(invoice) {
 }
 
 function bindModalForms() {
+  document.querySelectorAll('.return-match').forEach(sel=>{
+    sel.addEventListener('change',()=>{
+      const row=sel.closest('.return-check-row');
+      row?.querySelector('.return-actual')?.classList.toggle('hidden',sel.value!=='no');
+    });
+  });
   const forms = [
     ['warehouseForm', 'warehouse'],
     ['driverForm', 'driver'],
