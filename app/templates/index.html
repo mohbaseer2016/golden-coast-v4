@@ -45,7 +45,7 @@
       </nav>
 
       <section id="queueSection">
-        <div class="toolbar">
+        <div class="toolbar mobile-filter-panel">
           <button id="newInvoiceBtn" class="success hidden">+ إدخال فاتورة</button>
           <button id="refreshBtn">تحديث</button>
           <input id="queueFilter" placeholder="بحث في الفواتير المعلقة">
@@ -74,7 +74,7 @@
       </section>
 
       <section id="searchSection" class="hidden">
-        <div class="toolbar">
+        <div class="toolbar mobile-filter-panel">
           <input id="searchInput" placeholder="رقم الفاتورة أو اسم العميل">
           <label class="inline"><input id="includeClosed" type="checkbox"> يشمل المكتملة</label>
           <select id="searchStatusFilter">
@@ -102,14 +102,14 @@
         </div>
         <div class="card table-wrap">
           <table>
-            <thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>التاريخ</th><th></th></tr></thead>
+            <thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>تاريخ الفاتورة</th><th>تاريخ التحميل</th><th></th></tr></thead>
             <tbody id="searchBody"><tr><td colspan="6">اكتب كلمة بحث.</td></tr></tbody>
           </table>
         </div>
       </section>
 
       <section id="usersSection" class="hidden">
-        <div class="toolbar">
+        <div class="toolbar mobile-filter-panel">
   <button id="newUserBtn" class="success">+ مستخدم جديد</button>
   <input id="usersFilter" placeholder="بحث: اسم، مستخدم، دور، جوال">
   <select id="usersRoleFilter"><option value="">كل الأدوار</option><option value="ADMIN">إدارة</option><option value="HR">موارد</option><option value="WAREHOUSE">مخزن</option><option value="DRIVER">سائق</option></select>
@@ -125,7 +125,7 @@
       </section>
 
       <section id="vehiclesSection" class="hidden">
-        <div class="toolbar">
+        <div class="toolbar mobile-filter-panel">
           <button id="newVehicleBtn" class="success">+ إضافة سيارة</button>
           <input id="vehiclesFilter" placeholder="بحث: السيارة، اللوحة، النوع">
           <select id="vehiclesStatusFilter"><option value="">كل الحالات</option><option value="AVAILABLE">متاحة</option><option value="MISSION">في مهمة</option><option value="MAINTENANCE">صيانة</option><option value="STOPPED">موقوفة</option></select>
@@ -142,7 +142,7 @@
 
 
       <section id="productsSection" class="hidden">
-        <div class="toolbar">
+        <div class="toolbar mobile-filter-panel">
   <button id="newProductBtn" class="success">+ إضافة صنف</button>
   <input id="productsFilter" placeholder="بحث في الأصناف أو الوحدات">
   <select id="productsStatusFilter"><option value="">الكل</option><option value="active">فعال</option><option value="inactive">موقوف</option></select>
@@ -154,7 +154,7 @@
       </section>
 
       <section id="logsSection" class="hidden">
-        <div class="toolbar">
+        <div class="toolbar mobile-filter-panel">
           <input id="logsFilter" placeholder="بحث: مستخدم، حركة، فاتورة">
           <select id="logsSort"><option value="created_at">الأحدث</option><option value="username">المستخدم</option><option value="action">الحركة</option><option value="invoice_no">الفاتورة</option></select>
         </div>

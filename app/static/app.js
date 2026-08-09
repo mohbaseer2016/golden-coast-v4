@@ -60,6 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
   bootstrap();
+  setTimeout(bindLiveFilterControls,0);
 });
 
 function bind(id, event, handler) {
@@ -127,6 +128,7 @@ async function bootstrap() {
     renderFilteredVehicles();
     renderFilteredLogs();
     renderFilteredProducts();
+    bindLiveFilterControls();
   } catch (error) {
     if (!error.message.includes('الجلسة')) console.error(error);
   }
@@ -153,13 +155,13 @@ function renderQueue(rows) {
   const body = document.getElementById('queueBody');
   if (!body) return;
   body.innerHTML = rows.length ? rows.map(i => `<tr>
-    <td><b>${esc(i.invoice_no)}</b></td>
-    <td>${esc(i.customer || '')}</td>
-    <td>${esc(i.driver_name || 'لم يحدد')}</td>
-    <td>${statusName(i.status)}</td>
-    <td>${dateOnlyText(i.invoice_date)}</td>
-    <td>${i.loaded_at ? dateTimeText(i.loaded_at) : ''}</td>
-    <td><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
+    <td data-label="الفاتورة"><b>${esc(i.invoice_no)}</b></td>
+    <td data-label="العميل">${esc(i.customer || '')}</td>
+    <td data-label="السائق">${esc(i.driver_name || 'لم يحدد')}</td>
+    <td data-label="الحالة">${statusName(i.status)}</td>
+    <td data-label="تاريخ الفاتورة">${dateOnlyText(i.invoice_date)}</td>
+    <td data-label="تاريخ التحميل">${i.loaded_at ? dateTimeText(i.loaded_at) : ''}</td>
+    <td data-label=""><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
   </tr>`).join('') : '<tr><td colspan="7">لا توجد فواتير معلقة.</td></tr>';
   body.querySelectorAll('.open').forEach(btn => btn.addEventListener('click', () => openInvoice(btn.dataset.no)));
 }
@@ -380,12 +382,12 @@ function renderUsers(rows) {
   const body = document.getElementById('usersBody');
   body.innerHTML = rows.length
     ? rows.map(user => `<tr>
-        <td>${esc(user.username)}</td>
-        <td>${esc(user.name)}</td>
-        <td>${roleName(user.role)}</td>
-        <td>${esc(user.driver_code || '')}</td>
-        <td>${esc(user.phone || '')}</td>
-        <td>${user.active ? 'نشط' : 'موقوف'}</td>
+        <td data-label="المستخدم">${esc(user.username)}</td>
+        <td data-label="الاسم">${esc(user.name)}</td>
+        <td data-label="الدور">${roleName(user.role)}</td>
+        <td data-label="رمز السائق">${esc(user.driver_code || '')}</td>
+        <td data-label="الجوال">${esc(user.phone || '')}</td>
+        <td data-label="الحالة">${user.active ? 'نشط' : 'موقوف'}</td>
         <td><button class="edit-user" data-user="${attr(user.username)}">تعديل</button>
             ${user.username !== 'admin' ? `<button class="perm-user secondary" data-user="${attr(user.username)}">صلاحيات</button>
             <button class="toggle-user warn" data-user="${attr(user.username)}">${user.active?'توقيف':'تفعيل'}</button>
@@ -460,9 +462,9 @@ function renderVehicles(rows) {
   const body = document.getElementById('vehiclesBody');
   body.innerHTML = rows.length
     ? rows.map(vehicle => `<tr>
-        <td>${esc(vehicle.name)}</td><td>${esc(vehicle.plate_no)}</td>
-        <td>${esc(vehicle.vehicle_type || '')}</td><td>${esc(vehicle.status)}</td>
-        <td>${esc(vehicle.notes || '')}</td>
+        <td data-label="السيارة">${esc(vehicle.name)}</td><td data-label="اللوحة">${esc(vehicle.plate_no)}</td>
+        <td data-label="النوع">${esc(vehicle.vehicle_type || '')}</td><td data-label="الحالة">${esc(vehicle.status)}</td>
+        <td data-label="ملاحظات">${esc(vehicle.notes || '')}</td>
         <td>
           <button class="edit-vehicle" data-id="${vehicle.id}">تعديل</button>
           <button class="toggle-vehicle secondary" data-id="${vehicle.id}">${vehicle.active===false?'تفعيل':'تعطيل'}</button>
@@ -769,8 +771,8 @@ async function showDashboardBucket(bucket,title){
 function renderProducts(rows){
   const b=document.getElementById('productsBody'); if(!b)return;
   b.innerHTML=rows.length?rows.map(p=>`<tr>
-    <td>${esc(p.name)}</td>
-    <td>${esc((p.units||[]).join('، '))}</td>
+    <td data-label="الصنف">${esc(p.name)}</td>
+    <td data-label="الوحدات">${esc((p.units||[]).join('، '))}</td>
     <td>${p.active?'فعال':'موقوف'}</td>
     <td>
       <button class="edit-product" data-id="${p.id}">تعديل</button>
@@ -875,10 +877,14 @@ function renderFilteredSearch(){
   rows=sortRows(rows,key,desc);
   const body=document.getElementById('searchBody'); if(!body)return;
   body.innerHTML=rows.length?rows.map(i=>`<tr>
-    <td>${esc(i.invoice_no)}</td><td>${esc(i.customer||'')}</td>
-    <td>${esc(i.driver_name||'')}</td><td>${statusName(i.status)}</td>
-    <td>${dateOnlyText(i.invoice_date)}</td><td><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
-  </tr>`).join(''):'<tr><td colspan="6">لا توجد نتائج.</td></tr>';
+    <td data-label="الفاتورة">${esc(i.invoice_no)}</td>
+    <td data-label="العميل">${esc(i.customer||'')}</td>
+    <td data-label="السائق">${esc(i.driver_name||'')}</td>
+    <td data-label="الحالة">${statusName(i.status)}</td>
+    <td data-label="تاريخ الفاتورة">${dateOnlyText(i.invoice_date)}</td>
+    <td data-label="تاريخ التحميل">${i.loaded_at?dateTimeText(i.loaded_at):''}</td>
+    <td data-label=""><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
+  </tr>`).join(''):'<tr><td colspan="7">لا توجد نتائج.</td></tr>';
   body.querySelectorAll('.open').forEach(btn=>btn.addEventListener('click',()=>openInvoice(btn.dataset.no)));
 }
 
@@ -980,4 +986,24 @@ function setSubmitting(form, active, label='جاري الاعتماد...') {
     btn.classList.remove('is-loading');
     btn.textContent = btn.dataset.oldText || 'اعتماد';
   }
+}
+
+function bindLiveFilterControls(){
+  const pairs = [
+    ['queueFilter','queueSort','queueSortDirection'],
+    ['searchInput','searchStatusFilter','searchSort','searchSortDirection'],
+    ['usersFilter','usersRoleFilter','usersStatusFilter','usersSort'],
+    ['vehiclesFilter','vehiclesStatusFilter','vehiclesSort'],
+    ['productsFilter','productsStatusFilter','productsSort'],
+    ['logsFilter','logsSort']
+  ];
+  const handlers = [renderFilteredQueue, renderFilteredSearch, renderFilteredUsers, renderFilteredVehicles, renderFilteredProducts, renderFilteredLogs];
+  pairs.forEach((ids,idx)=>{
+    ids.forEach(id=>{
+      const el=document.getElementById(id);
+      if(!el || el.dataset.liveBound==='1') return;
+      ['input','change'].forEach(ev=>el.addEventListener(ev,handlers[idx]));
+      el.dataset.liveBound='1';
+    });
+  });
 }
