@@ -44,6 +44,15 @@ class InvoiceIssueItem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+
+class AppSetting(Base):
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Vehicle(Base):
     __tablename__ = "vehicles"
 
@@ -96,6 +105,12 @@ class Invoice(Base):
     return_photo: Mapped[str | None] = mapped_column(String(255), nullable=True)
     return_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     return_received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    sales_return_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    sales_return_reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    sales_return_reviewed_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    sales_return_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sales_return_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     original_document_received: Mapped[bool] = mapped_column(Boolean, default=False)
     closure_notes: Mapped[str | None] = mapped_column(Text, nullable=True)

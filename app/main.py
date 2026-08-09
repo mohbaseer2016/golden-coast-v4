@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
 from .drive_service import SupabaseStorage
-from .models import AuditLog, Invoice, User, Vehicle, Product, InvoiceIssueItem
+from .models import AuditLog, Invoice, User, Vehicle, Product, InvoiceIssueItem, AppSetting
 from .security import clear_session, hash_password, require_role, require_user, set_session, verify_password
 
 APP_DIR = Path(__file__).resolve().parent
@@ -24,7 +24,7 @@ ROOT_DIR = APP_DIR.parent
 UPLOAD_DIR = ROOT_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-ROLES = {"ADMIN", "HR", "WAREHOUSE", "DRIVER"}
+ROLES = {"ADMIN", "HR", "WAREHOUSE", "DRIVER", "SALES_ACCOUNTANT"}
 
 PERMISSION_CATALOG = {
     "screens": {
@@ -35,7 +35,7 @@ PERMISSION_CATALOG = {
         "invoice_create": "إضافة فاتورة", "invoice_edit": "تعديل فاتورة",
         "invoice_delete": "حذف فاتورة", "warehouse_approve": "اعتماد المخزن",
         "driver_approve": "اعتماد السائق", "return_approve": "استلام المرتجع",
-        "close_invoice": "إغلاق الفاتورة", "manage_users": "إدارة المستخدمين والصلاحيات",
+        "close_invoice": "استلام أصل الفاتورة", "sales_return_review": "اعتماد مردود المبيعات", "manage_users": "إدارة المستخدمين والصلاحيات",
         "manage_vehicles": "إدارة السيارات", "manage_products": "إدارة الأصناف"
     }
 }
@@ -45,6 +45,7 @@ ROLE_DEFAULTS = {
     "HR": {"screens": ["queue","search"], "actions": ["invoice_create","invoice_edit","close_invoice"]},
     "WAREHOUSE": {"screens": ["queue","search"], "actions": ["warehouse_approve","return_approve"]},
     "DRIVER": {"screens": ["queue","search"], "actions": ["driver_approve"]},
+    "SALES_ACCOUNTANT": {"screens": ["queue","search"], "actions": ["sales_return_review"]},
 }
 
 def effective_permissions(user_row: User | None, session_user: dict) -> dict:
@@ -76,12 +77,24 @@ def ensure_columns():
             stmts = [
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions_json TEXT",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS return_qty_text VARCHAR(180)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS delivery_mode VARCHAR(30)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_required BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_reviewed BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_reviewed_by VARCHAR(80)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_reviewed_at TIMESTAMP",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_return_notes TEXT",
             ]
         elif dialect == "sqlite":
             cols_u = {r[1] for r in conn.execute(text("PRAGMA table_info(users)"))}
             cols_i = {r[1] for r in conn.execute(text("PRAGMA table_info(invoices)"))}
             if "permissions_json" not in cols_u: stmts.append("ALTER TABLE users ADD COLUMN permissions_json TEXT")
             if "return_qty_text" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN return_qty_text VARCHAR(180)")
+            if "delivery_mode" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN delivery_mode VARCHAR(30)")
+            if "sales_return_required" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_required BOOLEAN DEFAULT 0")
+            if "sales_return_reviewed" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_reviewed BOOLEAN DEFAULT 0")
+            if "sales_return_reviewed_by" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_reviewed_by VARCHAR(80)")
+            if "sales_return_reviewed_at" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_reviewed_at DATETIME")
+            if "sales_return_notes" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN sales_return_notes TEXT")
         for stmt in stmts:
             conn.execute(text(stmt))
 
@@ -189,6 +202,64 @@ def logout():
     return response
 
 
+
+
+def numeric_invoice_no(value: str | None) -> int | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    # التسلسل يعمل على أرقام الفواتير الرقمية. الأرقام العربية يتم تحويلها كذلك.
+    trans = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
+    text_value = text_value.translate(trans)
+    if not text_value.isdigit():
+        return None
+    try:
+        return int(text_value)
+    except ValueError:
+        return None
+
+
+def get_invoice_sequence_start(db: Session) -> int | None:
+    row = db.get(AppSetting, "invoice_sequence_start")
+    if not row or not (row.value or "").strip():
+        return None
+    try:
+        return int(row.value)
+    except ValueError:
+        return None
+
+
+def invoice_sequence_status(db: Session) -> dict:
+    start = get_invoice_sequence_start(db)
+    numbers = []
+    for invoice_no in db.scalars(select(Invoice.invoice_no)).all():
+        value = numeric_invoice_no(invoice_no)
+        if value is not None:
+            numbers.append(value)
+    numbers = sorted(set(numbers))
+    if start is None:
+        return {"start": None, "max": max(numbers) if numbers else None, "missing": [], "configured": False}
+    eligible = [n for n in numbers if n >= start]
+    if not eligible:
+        return {"start": start, "max": None, "missing": [], "configured": True}
+    maximum = max(eligible)
+    present = set(eligible)
+    missing = [n for n in range(start, maximum + 1) if n not in present]
+    return {"start": start, "max": maximum, "missing": missing, "configured": True}
+
+def maybe_close_invoice(invoice: Invoice):
+    """Close only after original document is received and any required sales-return review is done."""
+    ready_document = bool(invoice.original_document_received)
+    ready_return = (not invoice.sales_return_required) or bool(invoice.sales_return_reviewed)
+    if ready_document and ready_return:
+        invoice.status = "CLOSED"
+        invoice.current_owner = "ARCHIVE"
+        invoice.closed_at = datetime.utcnow()
+        return True
+    invoice.status = "FINAL_REVIEW_PENDING"
+    invoice.current_owner = "MULTI"
+    return False
+
 def user_dict(user: User):
     return {
         "username": user.username,
@@ -220,6 +291,7 @@ def invoice_dict(invoice: Invoice):
         "customer": invoice.customer,
         "invoice_date": invoice.invoice_date.isoformat() if invoice.invoice_date else None,
         "driver_code": invoice.driver_code,
+        "delivery_mode": invoice.delivery_mode,
         "driver_name": invoice.driver_name,
         "is_external_driver": invoice.is_external_driver,
         "vehicle_no": invoice.vehicle_no,
@@ -288,7 +360,16 @@ def get_queue(db: Session, user: dict):
     if user["role"] == "ADMIN":
         stmt = stmt.where(Invoice.status != "CLOSED")
     elif user["role"] == "HR":
-        stmt = stmt.where(Invoice.status == "DOCUMENT_PENDING")
+        stmt = stmt.where(
+            Invoice.status.in_(["DOCUMENT_PENDING", "FINAL_REVIEW_PENDING"]),
+            Invoice.original_document_received == False,
+        )
+    elif user["role"] == "SALES_ACCOUNTANT":
+        stmt = stmt.where(
+            Invoice.status.in_(["FINAL_REVIEW_PENDING", "DOCUMENT_PENDING"]),
+            Invoice.sales_return_required == True,
+            Invoice.sales_return_reviewed == False,
+        )
     elif user["role"] == "WAREHOUSE":
         stmt = stmt.where(Invoice.status.in_(["WAREHOUSE_PENDING", "RETURN_PENDING"]))
     elif user["role"] == "DRIVER":
@@ -332,6 +413,7 @@ def bootstrap(request: Request, db: Session = Depends(get_db)):
                      ).all()],
         "permission_catalog": PERMISSION_CATALOG,
         "permissions": effective_permissions(db.scalar(select(User).where(User.username == user["username"])), user),
+        "invoice_sequence": invoice_sequence_status(db),
     }
 
 
@@ -397,7 +479,8 @@ def get_invoice(invoice_no: str, request: Request, db: Session = Depends(get_db)
 def warehouse_update(
     invoice_no: str,
     request: Request,
-    driver_code: str = Form(...),
+    delivery_mode: str = Form("COMPANY_DRIVER"),
+    driver_code: str = Form(""),
     vehicle_id: int | None = Form(None),
     load_status: str = Form(...),
     shortage_reason: str = Form(""),
@@ -405,33 +488,37 @@ def warehouse_update(
     loaded_at: str = Form(""),
     issues_json: str = Form("[]"),
     photo: UploadFile | None = File(None),
+    receipt_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     user = require_permission(request, db, "warehouse_approve")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or invoice.status != "WAREHOUSE_PENDING":
         raise HTTPException(status_code=400, detail="الفاتورة ليست معلقة في المخزن.")
-
-    driver = db.scalar(select(User).where(
-        User.driver_code == driver_code,
-        User.role == "DRIVER",
-        User.active == True,
-    ))
-    vehicle = db.get(Vehicle, vehicle_id) if vehicle_id else None
-    if not driver:
+    driver = None
+    if delivery_mode in ["COMPANY_DRIVER", "EXTERNAL_DRIVER"]:
+        driver = db.scalar(select(User).where(User.driver_code == driver_code, User.role == "DRIVER", User.active == True))
+        if not driver:
+            raise HTTPException(status_code=400, detail="اختر السائق.")
         raise HTTPException(status_code=400, detail="اختر سائقًا.")
-    if not driver.is_external_driver and (not vehicle or not vehicle.active):
+    if delivery_mode == "COMPANY_DRIVER" and (not vehicle or not vehicle.active):
         raise HTTPException(status_code=400, detail="اختيار الدينة إجباري لسائق الشركة.")
 
-    invoice.driver_code = driver.driver_code or ""
-    invoice.driver_name = driver.name
-    invoice.is_external_driver = driver.is_external_driver
-    invoice.vehicle_no = None if driver.is_external_driver else f"{vehicle.name} - {vehicle.plate_no}"
+    invoice.delivery_mode = delivery_mode
+    invoice.driver_code = driver.driver_code if driver else "CUSTOMER_SELF" or ""
+    invoice.driver_name = driver.name if driver else "العميل نفسه"
+    invoice.is_external_driver = (delivery_mode == "EXTERNAL_DRIVER")
+    invoice.vehicle_no = f"{vehicle.name} - {vehicle.plate_no}" if delivery_mode == "COMPANY_DRIVER" and vehicle else None
     invoice.load_status = load_status
     invoice.warehouse_shortage_reason = shortage_reason.strip() or None
     invoice.warehouse_notes = notes.strip() or None
     invoice.warehouse_photo = save_upload(photo, invoice_no, "warehouse") or invoice.warehouse_photo
     invoice.loaded_at = datetime.fromisoformat(loaded_at) if loaded_at else datetime.utcnow()
+    customer_self_receipt = save_upload(receipt_photo, invoice_no, "receipt_customer_self")
+    if delivery_mode == "CUSTOMER_SELF" and not customer_self_receipt:
+        raise HTTPException(status_code=400, detail="صورة الاستلام إجبارية عندما يستلم العميل البضاعة بنفسه.")
+    if customer_self_receipt:
+        invoice.receipt_photo = customer_self_receipt
 
     db.query(InvoiceIssueItem).filter(InvoiceIssueItem.invoice_no == invoice_no, InvoiceIssueItem.stage == "WAREHOUSE").delete()
     try:
@@ -451,7 +538,10 @@ def warehouse_update(
         invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
         invoice.delivery_result = "سائق خارجي — بانتظار إرسال الاستلام للموارد"
     else:
-        invoice.status, invoice.current_owner = "DRIVER_PENDING", "DRIVER"
+        invoice.status, invoice.current_owner = (
+            ("DRIVER_PENDING", "DRIVER") if delivery_mode == "COMPANY_DRIVER"
+            else ("DOCUMENT_PENDING", "HR")
+        )
 
     invoice.updated_by = user["username"]
     db.commit()
@@ -511,6 +601,7 @@ def driver_update(
                 quantity=str(row.get("quantity"))))
 
     if delivery_result == "تم كامل":
+        invoice.sales_return_required = False
         invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
     elif delivery_result in ["تم جزئي", "رفض كامل"]:
         invoice.status, invoice.current_owner = "RETURN_PENDING", "WAREHOUSE"
@@ -551,12 +642,81 @@ def return_update(
     invoice.return_notes = notes.strip() or None
     invoice.return_photo = image
     invoice.return_received_at = datetime.utcnow()
-    invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
+    invoice.sales_return_required = True
+    invoice.sales_return_reviewed = False
+    invoice.status, invoice.current_owner = "FINAL_REVIEW_PENDING", "MULTI"
     invoice.updated_by = user["username"]
     db.commit()
     audit(db, "RETURN_UPDATE", user["username"], invoice_no)
     return {"ok": True}
 
+
+
+@app.post("/api/invoices/{invoice_no}/external-delivery")
+def external_delivery_update(
+    invoice_no: str,
+    request: Request,
+    delivery_result: str = Form(...),
+    return_qty_declared: str = Form(""),
+    reason: str = Form(""),
+    notes: str = Form(""),
+    issues_json: str = Form("[]"),
+    receipt_photo: UploadFile | None = File(None),
+    return_photo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    user = require_user(request)
+    if user["role"] not in ["ADMIN", "HR"]:
+        raise HTTPException(status_code=403, detail="هذه العملية للموارد أو الإدارة فقط.")
+    invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
+    if not invoice or invoice.delivery_mode != "EXTERNAL_DRIVER" or invoice.status != "DOCUMENT_PENDING":
+        raise HTTPException(status_code=400, detail="الفاتورة ليست بانتظار متابعة السائق الخارجي.")
+    receipt = save_upload(receipt_photo, invoice_no, "receipt_external")
+    returned = save_upload(return_photo, invoice_no, "return_external")
+    if not (receipt or invoice.receipt_photo):
+        raise HTTPException(status_code=400, detail="صورة الاستلام إجبارية للسائق الخارجي.")
+    invoice.delivery_result = delivery_result
+    invoice.delivery_reason = reason.strip() or None
+    invoice.driver_notes = notes.strip() or None
+    invoice.return_qty_text = return_qty_declared.strip() or None
+    invoice.receipt_photo = receipt or invoice.receipt_photo
+    invoice.driver_return_photo = returned or invoice.driver_return_photo
+    invoice.delivered_at = datetime.utcnow()
+    if delivery_result in ["تم جزئي", "رفض كامل"]:
+        invoice.status, invoice.current_owner = "RETURN_PENDING", "WAREHOUSE"
+    else:
+        invoice.sales_return_required = False
+        invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
+    invoice.updated_by = user["username"]
+    db.commit()
+    audit(db, "EXTERNAL_DRIVER_UPDATE", user["username"], invoice_no)
+    return {"ok": True}
+
+
+
+@app.post("/api/invoices/{invoice_no}/sales-return-review")
+def sales_return_review(
+    invoice_no: str,
+    request: Request,
+    notes: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    user = require_permission(request, db, "sales_return_review")
+    invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
+    if not invoice or not invoice.sales_return_required:
+        raise HTTPException(status_code=400, detail="لا يوجد مردود يحتاج اعتماد محاسب المبيعات.")
+    if invoice.sales_return_reviewed:
+        raise HTTPException(status_code=400, detail="تم اعتماد المردود مسبقًا.")
+
+    invoice.sales_return_reviewed = True
+    invoice.sales_return_reviewed_by = user["username"]
+    invoice.sales_return_reviewed_at = datetime.utcnow()
+    invoice.sales_return_notes = notes.strip() or None
+    invoice.updated_by = user["username"]
+    closed = maybe_close_invoice(invoice)
+    db.commit()
+    audit(db, "SALES_RETURN_REVIEW", user["username"], invoice_no, {"closed": closed})
+    return {"ok": True, "closed": closed}
 
 @app.post("/api/invoices/{invoice_no}/close")
 def close_invoice(
@@ -569,26 +729,49 @@ def close_invoice(
 ):
     user = require_permission(request, db, "close_invoice")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
-    if not invoice or invoice.status != "DOCUMENT_PENDING":
-        raise HTTPException(status_code=400, detail="الفاتورة ليست عند الموارد.")
+    if not invoice or invoice.status not in ["DOCUMENT_PENDING", "FINAL_REVIEW_PENDING"]:
+        raise HTTPException(status_code=400, detail="الفاتورة ليست بانتظار المراجعة النهائية.")
     if original_received != "نعم":
         raise HTTPException(status_code=400, detail="أصل الفاتورة لم يُستلم.")
 
-    if invoice.is_external_driver:
-        image = save_upload(external_receipt, invoice_no, "external_receipt")
-        if not image:
-            raise HTTPException(status_code=400, detail="صورة استلام السائق الخارجي مطلوبة.")
-        invoice.receipt_photo = image
 
     invoice.original_document_received = True
     invoice.closure_notes = notes.strip() or None
-    invoice.status, invoice.current_owner = "CLOSED", "ARCHIVE"
-    invoice.closed_at = datetime.utcnow()
     invoice.updated_by = user["username"]
+    closed = maybe_close_invoice(invoice)
     db.commit()
-    audit(db, "CLOSE_INVOICE", user["username"], invoice_no)
-    return {"ok": True}
+    audit(db, "ORIGINAL_DOCUMENT_RECEIVED", user["username"], invoice_no, {"closed": closed})
+    return {"ok": True, "closed": closed}
 
+
+
+
+@app.get("/api/settings/invoice-sequence")
+def get_invoice_sequence(request: Request, db: Session = Depends(get_db)):
+    require_user(request)
+    return invoice_sequence_status(db)
+
+
+@app.post("/api/settings/invoice-sequence")
+def set_invoice_sequence(
+    request: Request,
+    start: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = require_user(request)
+    if user["role"] not in ["ADMIN", "HR"]:
+        raise HTTPException(status_code=403, detail="تحديد بداية تسلسل الفواتير متاح للإدارة أو الموارد.")
+    if start < 1:
+        raise HTTPException(status_code=400, detail="رقم بداية التسلسل يجب أن يكون أكبر من صفر.")
+    row = db.get(AppSetting, "invoice_sequence_start")
+    if row is None:
+        row = AppSetting(key="invoice_sequence_start", value=str(start))
+        db.add(row)
+    else:
+        row.value = str(start)
+    db.commit()
+    audit(db, "SET_INVOICE_SEQUENCE_START", user["username"], details={"start": start})
+    return invoice_sequence_status(db)
 
 
 @app.get("/api/dashboard/{bucket}")

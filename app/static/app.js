@@ -1,6 +1,6 @@
 'use strict';
 
-const state = {user:null, drivers:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], permissions:{screens:[],actions:[]}, permissionCatalog:{}, current:null};
+const state = {user:null, drivers:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], invoiceSequence:{start:null,max:null,missing:[],configured:false}, permissions:{screens:[],actions:[]}, permissionCatalog:{}, invoiceSequence:{start:null,max:null,missing:[],configured:false}, current:null};
 
 const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
 let inactivityTimer = null;
@@ -47,6 +47,7 @@ document.addEventListener('DOMContentLoaded', () => {
   bind('newUserBtn','click',showNewUser);
   bind('newVehicleBtn','click',showNewVehicle);
   bind('newProductBtn','click',showNewProduct);
+  bind('saveSequenceStartBtn','click',saveInvoiceSequenceStart);
   bind('searchBtn','click',search);
   bind('closeModalBtn','click',closeModal);
 
@@ -112,10 +113,12 @@ async function bootstrap() {
     state.products = data.products || [];
     state.permissions = data.permissions || {screens:[],actions:[]};
     state.permissionCatalog = data.permission_catalog || {};
+    state.invoiceSequence = data.invoice_sequence || {start:null,max:null,missing:[],configured:false};
 
     document.getElementById('loginView').classList.add('hidden');
     document.getElementById('appView').classList.remove('hidden');
     document.getElementById('userLabel').textContent = `${state.user.name} — ${roleName(state.user.role)}`;
+    renderInvoiceSequence();
     document.getElementById('newInvoiceBtn').classList.toggle('hidden', !state.permissions.actions.includes('invoice_create'));
     document.getElementById('usersTab').classList.toggle('hidden', !state.permissions.screens.includes('users'));
     document.getElementById('vehiclesTab').classList.toggle('hidden', !state.permissions.screens.includes('vehicles'));
@@ -207,10 +210,14 @@ function showInvoice(invoice) {
     html += returnForm(invoice);
   } else if (['ADMIN','DRIVER'].includes(state.user.role) && ['DRIVER_PENDING','POSTPONED'].includes(invoice.status)) {
     html += driverForm();
-  } else if (['ADMIN','HR'].includes(state.user.role) && invoice.status === 'DOCUMENT_PENDING') {
+  } else if (['ADMIN','HR'].includes(state.user.role) && invoice.status === 'DOCUMENT_PENDING' && invoice.delivery_mode === 'EXTERNAL_DRIVER' && !invoice.receipt_photo) {
+    html += externalDriverForm();
+  } else if (['ADMIN','SALES_ACCOUNTANT'].includes(state.user.role) && invoice.sales_return_required && !invoice.sales_return_reviewed && ['FINAL_REVIEW_PENDING','DOCUMENT_PENDING'].includes(invoice.status)) {
+    html += salesReturnReviewForm(invoice);
+  } else if (['ADMIN','HR'].includes(state.user.role) && !invoice.original_document_received && ['DOCUMENT_PENDING','FINAL_REVIEW_PENDING'].includes(invoice.status)) {
     html += closeForm(invoice);
   } else {
-    html += '<p>عرض فقط.</p>';
+    html += finalReviewSummary(invoice);
   }
 
   html += '<hr><h3>التعديل</h3>';
@@ -232,16 +239,26 @@ function showInvoice(invoice) {
 }
 
 function warehouseForm() {
-  const driverOptions = state.drivers.map(d => `<option value="${attr(d.driver_code)}" data-external="${d.is_external_driver?'1':'0'}">${esc(d.name)}${d.is_external_driver?' (خارجي)':''}</option>`).join('');
-  const vehicleOptions = state.vehicles.map(v => `<option value="${v.id}">${esc(v.name)} — ${esc(v.plate_no)}</option>`).join('');
+  const companyDrivers = state.drivers.filter(d=>!d.is_external_driver).map(d=>`<option value="${attr(d.driver_code)}">${esc(d.name)}</option>`).join('');
+  const externalDrivers = state.drivers.filter(d=>d.is_external_driver).map(d=>`<option value="${attr(d.driver_code)}">${esc(d.name)}</option>`).join('');
+  const vehicleOptions = state.vehicles.map(v=>`<option value="${v.id}">${esc(v.name)} — ${esc(v.plate_no)}</option>`).join('');
   return `<form id="warehouseForm">
-    <label>السائق</label><select id="warehouseDriver" name="driver_code" required><option value="">اختر</option>${driverOptions}</select>
+    <label>طريقة التوصيل / الاستلام</label>
+    <select id="deliveryMode" name="delivery_mode" required>
+      <option value="COMPANY_DRIVER">سائق من الشركة</option>
+      <option value="EXTERNAL_DRIVER">سائق خارجي</option>
+      <option value="CUSTOMER_SELF">العميل نفسه يستلم</option>
+    </select>
+    <div id="companyDriverField"><label>سائق الشركة</label><select id="companyDriverSelect"><option value="">اختر</option>${companyDrivers}</select></div>
+    <div id="externalDriverField" class="hidden"><label>السائق الخارجي</label><select id="externalDriverSelect"><option value="">اختر</option>${externalDrivers}</select></div>
+    <input type="hidden" name="driver_code" id="warehouseDriverCode">
     <div id="vehicleField"><label>الدينة / السيارة</label><select name="vehicle_id"><option value="">اختر</option>${vehicleOptions}</select></div>
+    <div id="customerReceiptField" class="hidden"><label>صورة الاستلام من العميل (إجباري)</label><input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif"></div>
     <label>حالة التحميل</label><select id="loadStatus" name="load_status"><option>تم التحميل كامل</option><option>تم التحميل ناقص</option><option>مرفوض من المخزن</option></select>
     <label>تاريخ ووقت التحميل</label><input name="loaded_at" type="datetime-local" required value="${localDateTimeValue()}">
     <div id="warehouseIssues" class="hidden"><h3>الأصناف الناقصة / المرتجعة</h3><div id="warehouseIssueRows"></div><button type="button" class="secondary" id="addWarehouseIssue">+ إضافة صنف</button></div>
     <label>سبب النقص أو الرفض</label><input name="shortage_reason">
-    <label>صورة</label><input type="file" name="photo" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
+    <label>صورة التحميل (اختياري)</label><input type="file" name="photo" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
     <label>ملاحظات</label><textarea name="notes"></textarea>
     <input type="hidden" name="issues_json" value="[]"><button>اعتماد</button>
   </form>`;
@@ -266,6 +283,20 @@ function driverForm() {
   </form>`;
 }
 
+
+function externalDriverForm() {
+  return `<form id="externalDriverForm">
+    <div class="card"><b>السائق الخارجي:</b> الموارد تسجل نتيجة التسليم وترفع صورة الاستلام المرسلة من السائق.</div>
+    <label>نتيجة التسليم</label><select name="delivery_result"><option>تم كامل</option><option>تم جزئي</option><option>رفض كامل</option><option>مؤجل</option><option>العميل مغلق</option></select>
+    <label>وصف كمية المرتجع</label><input name="return_qty_declared" type="text" placeholder="مثال: ٢٠ تنك مرتجع">
+    <input type="hidden" name="issues_json" value="[]">
+    <label>السبب</label><input name="reason">
+    <label>صورة الاستلام (إجباري)</label><input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif" required>
+    <label>صورة المرتجع (اختياري)</label><input name="return_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
+    <label>ملاحظات</label><textarea name="notes"></textarea><button>اعتماد نتيجة السائق الخارجي</button>
+  </form>`;
+}
+
 function returnForm(invoice) {
   return `<form id="returnForm">
     <label>الكمية المستلمة فعليًا</label>
@@ -286,16 +317,43 @@ function closeForm(invoice) {
     <select name="original_received"><option>نعم</option><option>لا</option></select>
     ${externalField}
     <label>ملاحظات</label><textarea name="notes"></textarea>
-    <button class="success">إغلاق الفاتورة</button>
+    <button class="success">تأكيد استلام أصل الفاتورة</button>
   </form>`;
+}
+
+
+function salesReturnReviewForm(invoice) {
+  return `<form id="salesReturnReviewForm">
+    <div class="card">
+      <b>مراجعة مردود المبيعات</b><br>
+      تأكد من تفاصيل المردود التي سجلها السائق وما استلمه المخزن، ثم اعتمد.
+    </div>
+    <label>ملاحظات محاسب المبيعات</label>
+    <textarea name="notes"></textarea>
+    <button class="success">اعتماد المردود</button>
+  </form>`;
+}
+
+function finalReviewSummary(invoice) {
+  const original = invoice.original_document_received ? '✓ تم استلام أصل الفاتورة' : '⏳ أصل الفاتورة لم يُستلم بعد';
+  const sales = !invoice.sales_return_required ? 'لا يوجد مردود يحتاج اعتماد'
+    : (invoice.sales_return_reviewed ? '✓ تم اعتماد المردود من محاسب المبيعات' : '⏳ المردود بانتظار محاسب المبيعات');
+  return `<div class="card final-review-summary">
+    <h3>حالة الإقفال</h3>
+    <div>${original}</div>
+    <div>${sales}</div>
+    ${invoice.sales_return_notes ? `<div><b>ملاحظات المردود:</b> ${esc(invoice.sales_return_notes)}</div>` : ''}
+  </div>`;
 }
 
 function bindModalForms() {
   const forms = [
     ['warehouseForm', 'warehouse'],
     ['driverForm', 'driver'],
+    ['externalDriverForm', 'external-delivery'],
     ['returnForm', 'return'],
     ['closeForm', 'close'],
+    ['salesReturnReviewForm', 'sales-return-review'],
     ['invoiceForm', 'invoices'],
     ['userForm', 'users'],
     ['vehicleForm', 'vehicles'],
@@ -339,7 +397,7 @@ function bindModalForms() {
         else if (id === 'editUserForm') url = '/api/users/' + encodeURIComponent(form.dataset.username);
         else url = `/api/invoices/${encodeURIComponent(state.current.invoice_no)}/${path}`;
 
-        const hasImageUpload = ['driverForm','warehouseForm','returnForm','closeForm'].includes(id);
+        const hasImageUpload = ['driverForm','externalDriverForm','warehouseForm','returnForm','closeForm'].includes(id);
         if (hasImageUpload) setSubmitting(form, true, id === 'driverForm' ? 'جاري رفع الصورة والاعتماد...' : 'جاري الحفظ...');
         const body = hasImageUpload ? await optimizedFormData(form) : new FormData(form);
         await api(url, {method:'POST', body});
@@ -696,6 +754,7 @@ function statusName(status) {
     POSTPONED:'مؤجلة',
     RETURN_PENDING:'مرتجع للمخزن',
     DOCUMENT_PENDING:'عند الموارد',
+    FINAL_REVIEW_PENDING:'بانتظار استكمال الإقفال',
     CLOSED:'مكتملة'
   }[status] || status;
 }
@@ -745,11 +804,25 @@ function serializeIssueRows(form){
   const h=form.querySelector('[name="issues_json"]'); if(h) h.value=JSON.stringify(rows);
 }
 function setupWarehouseForm(form){
-  const d=form.querySelector('#warehouseDriver'), vf=form.querySelector('#vehicleField'), vs=form.querySelector('[name="vehicle_id"]');
-  const ls=form.querySelector('#loadStatus'), box=form.querySelector('#warehouseIssues');
-  const syncDriver=()=>{const ext=d.selectedOptions[0]?.dataset.external==='1';vf.classList.toggle('hidden',ext);vs.required=!ext;if(ext)vs.value='';};
-  const syncLoad=()=>box.classList.toggle('hidden',ls.value!=='تم التحميل ناقص');
-  d.addEventListener('change',syncDriver); ls.addEventListener('change',syncLoad); syncDriver(); syncLoad();
+  const mode=form.querySelector('#deliveryMode'), companyField=form.querySelector('#companyDriverField'), externalField=form.querySelector('#externalDriverField');
+  const companySelect=form.querySelector('#companyDriverSelect'), externalSelect=form.querySelector('#externalDriverSelect'), driverCode=form.querySelector('#warehouseDriverCode');
+  const vehicleField=form.querySelector('#vehicleField'), vehicleSelect=form.querySelector('[name="vehicle_id"]');
+  const customerReceiptField=form.querySelector('#customerReceiptField'), customerReceipt=form.querySelector('[name="receipt_photo"]');
+  const loadStatus=form.querySelector('#loadStatus'), issuesBox=form.querySelector('#warehouseIssues');
+  const syncMode=()=>{
+    const v=mode.value;
+    companyField.classList.toggle('hidden',v!=='COMPANY_DRIVER');
+    externalField.classList.toggle('hidden',v!=='EXTERNAL_DRIVER');
+    vehicleField.classList.toggle('hidden',v!=='COMPANY_DRIVER');
+    customerReceiptField.classList.toggle('hidden',v!=='CUSTOMER_SELF');
+    companySelect.required=v==='COMPANY_DRIVER'; externalSelect.required=v==='EXTERNAL_DRIVER';
+    vehicleSelect.required=v==='COMPANY_DRIVER'; customerReceipt.required=v==='CUSTOMER_SELF';
+    driverCode.value=v==='COMPANY_DRIVER'?companySelect.value:(v==='EXTERNAL_DRIVER'?externalSelect.value:'');
+    if(v!=='COMPANY_DRIVER') vehicleSelect.value='';
+  };
+  [mode,companySelect,externalSelect].forEach(el=>el.addEventListener('change',syncMode));
+  const syncLoad=()=>issuesBox.classList.toggle('hidden',loadStatus.value!=='تم التحميل ناقص');
+  loadStatus.addEventListener('change',syncLoad); syncMode(); syncLoad();
   setupIssueEditor(form,'warehouseIssueRows','addWarehouseIssue',true);
 }
 async function showDashboardBucket(bucket,title){
@@ -760,12 +833,15 @@ async function showDashboardBucket(bucket,title){
     document.getElementById('modalContent').innerHTML=`<div class="toolbar">
       <input id="popupFilter" placeholder="فرز/بحث: فاتورة، عميل، سائق">
       <select id="popupSort"><option value="invoice_no">رقم الفاتورة</option><option value="customer">العميل</option><option value="driver_name">السائق</option><option value="invoice_date">تاريخ الفاتورة</option><option value="loaded_at">تاريخ التحميل</option></select>
+      <select id="popupSortDirection"><option value="asc">الأصغر / الأقدم أولاً</option><option value="desc">الأكبر / الأحدث أولاً</option></select>
     </div><div id="popupRows"></div>`;
     const draw=()=>{const q=document.getElementById('popupFilter').value.toLowerCase(), key=document.getElementById('popupSort').value;
-      const data=rows.filter(x=>[x.invoice_no,x.customer,x.driver_name].join(' ').toLowerCase().includes(q)).sort((a,b)=>String(a[key]||'').localeCompare(String(b[key]||'')));
+      const desc=(document.getElementById('popupSortDirection')?.value||'asc')==='desc';
+      const filtered=rows.filter(x=>[x.invoice_no,x.customer,x.driver_name].join(' ').toLowerCase().includes(q));
+      const data=sortRows(filtered,key,desc);
       document.getElementById('popupRows').innerHTML=`<div class="table-wrap"><table><thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>تاريخ الفاتورة</th><th>تاريخ التحميل</th><th></th></tr></thead><tbody>${data.map(i=>`<tr><td>${esc(i.invoice_no)}</td><td>${esc(i.customer||'')}</td><td>${esc(i.driver_name||'')}</td><td>${statusName(i.status)}</td><td>${dateTimeText(i.invoice_date)}</td><td>${dateTimeText(i.loaded_at)}</td><td><button class="popup-open" data-no="${attr(i.invoice_no)}">فتح</button></td></tr>`).join('')}</tbody></table></div>`;
       document.querySelectorAll('.popup-open').forEach(b=>b.addEventListener('click',()=>openInvoice(b.dataset.no)));
-    }; openModal(); draw(); document.getElementById('popupFilter').addEventListener('input',draw);document.getElementById('popupSort').addEventListener('change',draw);
+    }; openModal(); draw(); document.getElementById('popupFilter').addEventListener('input',draw);document.getElementById('popupSort').addEventListener('change',draw);document.getElementById('popupSortDirection')?.addEventListener('change',draw);
   }catch(e){toast(e.message,true);}
 }
 function renderProducts(rows){
@@ -1006,4 +1082,49 @@ function bindLiveFilterControls(){
       el.dataset.liveBound='1';
     });
   });
+}
+
+
+function renderInvoiceSequence(){
+  const box=document.getElementById('sequenceConfig');
+  const input=document.getElementById('sequenceStartInput');
+  const warning=document.getElementById('sequenceWarning');
+  if(!box || !warning) return;
+
+  const canConfigure=['ADMIN','HR'].includes(state.user?.role);
+  box.classList.toggle('hidden',!canConfigure);
+  if(input && state.invoiceSequence?.start) input.value=state.invoiceSequence.start;
+
+  const seq=state.invoiceSequence||{};
+  if(!seq.configured){
+    warning.classList.remove('hidden');
+    warning.innerHTML='⚠️ لم يتم تحديد بداية تسلسل الفواتير. حدد أول رقم تريد أن يبدأ النظام التدقيق منه.';
+    return;
+  }
+
+  const missing=seq.missing||[];
+  if(!missing.length){
+    warning.classList.remove('hidden');
+    warning.innerHTML=`✓ تسلسل الفواتير سليم من رقم <b>${seq.start}</b>${seq.max?` حتى <b>${seq.max}</b>`:''}.`;
+    warning.classList.add('sequence-ok');
+    return;
+  }
+
+  warning.classList.remove('hidden','sequence-ok');
+  const preview=missing.slice(0,40).join('، ');
+  const more=missing.length>40?` … و${missing.length-40} رقم آخر`:'';
+  warning.innerHTML=`⚠️ <b>يوجد ${missing.length} رقم فاتورة مفقود في التسلسل</b><br>
+    من ${seq.start} إلى ${seq.max}: ${preview}${more}`;
+}
+
+async function saveInvoiceSequenceStart(){
+  const input=document.getElementById('sequenceStartInput');
+  const start=Number(input?.value||0);
+  if(!start || start<1){toast('اكتب رقم بداية صحيح للتسلسل.',true);return;}
+  const fd=new FormData();fd.set('start',String(start));
+  try{
+    state.invoiceSequence=await api('/api/settings/invoice-sequence',{method:'POST',body:fd});
+    renderInvoiceSequence();
+    toast('تم حفظ بداية تسلسل الفواتير.');
+  }catch(e){toast(e.message,true);}
 }

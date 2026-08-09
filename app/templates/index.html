@@ -48,6 +48,10 @@
         <div class="toolbar mobile-filter-panel">
           <button id="newInvoiceBtn" class="success hidden">+ إدخال فاتورة</button>
           <button id="refreshBtn">تحديث</button>
+          <div id="sequenceConfig" class="sequence-config hidden">
+            <input id="sequenceStartInput" type="number" min="1" placeholder="بداية تسلسل الفواتير">
+            <button id="saveSequenceStartBtn" type="button" class="secondary">حفظ بداية التسلسل</button>
+          </div>
           <input id="queueFilter" placeholder="بحث في الفواتير المعلقة">
           <select id="queueSort">
             <option value="invoice_date">تاريخ الفاتورة</option>
@@ -62,6 +66,7 @@
             <option value="asc">الأقدم / الأصغر أولاً</option>
           </select>
         </div>
+        <div id="sequenceWarning" class="sequence-warning hidden"></div>
         <div class="card">
           <h2>الفواتير المعلقة عندك</h2>
           <div class="table-wrap">
@@ -112,7 +117,7 @@
         <div class="toolbar mobile-filter-panel">
   <button id="newUserBtn" class="success">+ مستخدم جديد</button>
   <input id="usersFilter" placeholder="بحث: اسم، مستخدم، دور، جوال">
-  <select id="usersRoleFilter"><option value="">كل الأدوار</option><option value="ADMIN">إدارة</option><option value="HR">موارد</option><option value="WAREHOUSE">مخزن</option><option value="DRIVER">سائق</option></select>
+  <select id="usersRoleFilter"><option value="">كل الأدوار</option><option value="ADMIN">إدارة</option><option value="HR">موارد</option><option value="WAREHOUSE">مخزن</option><option value="DRIVER">سائق</option><option value="SALES_ACCOUNTANT">محاسب المبيعات</option></select>
   <select id="usersStatusFilter"><option value="">الكل</option><option value="active">فعال</option><option value="inactive">موقوف</option></select>
   <select id="usersSort"><option value="name">الاسم</option><option value="username">اسم المستخدم</option><option value="role">الدور</option></select>
 </div>
