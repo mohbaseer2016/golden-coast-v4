@@ -6,6 +6,11 @@ from urllib.parse import quote
 
 import httpx
 from PIL import Image, UnidentifiedImageError
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
 
 
 class SupabaseStorage:
@@ -24,10 +29,17 @@ class SupabaseStorage:
     @staticmethod
     def _compress_image(raw: bytes) -> bytes:
         try:
-            image = Image.open(io.BytesIO(raw)).convert("RGB")
+            source = Image.open(io.BytesIO(raw))
+            source.load()
         except (UnidentifiedImageError, OSError) as exc:
-            raise ValueError("الملف المرفوع ليس صورة صالحة.") from exc
+            raise ValueError("الملف المرفوع ليس صورة صالحة أو صيغة الصورة غير مدعومة.") from exc
 
+        # المتصفح يضغط الصور قبل الإرسال. لا نعيد ضغط JPEG صغير بلا داعٍ.
+        if (source.format in ("JPEG", "JPG") and len(raw) <= 950 * 1024
+                and max(source.size) <= 1280 and source.mode in ("RGB", "L")):
+            return raw
+
+        image = source.convert("RGB")
         image.thumbnail((1280, 1280))
         output = io.BytesIO()
         image.save(output, format="JPEG", quality=68, optimize=False)

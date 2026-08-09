@@ -399,6 +399,7 @@ function bindModalForms() {
   forms.forEach(([id, path]) => {
     const form = document.getElementById(id);
     if (!form) return;
+    if (form.querySelector('input[type="file"]')) prepareImageInputs(form);
 
     if (id === 'warehouseForm') setupWarehouseForm(form);
     if (id === 'driverForm') {
@@ -434,7 +435,7 @@ function bindModalForms() {
         else url = `/api/invoices/${encodeURIComponent(state.current.invoice_no)}/${path}`;
 
         const hasImageUpload = ['driverForm','externalDriverForm','warehouseForm','returnForm','closeForm'].includes(id);
-        if (hasImageUpload) setSubmitting(form, true, id === 'driverForm' ? 'جاري رفع الصورة والاعتماد...' : 'جاري الحفظ...');
+        if (hasImageUpload) setSubmitting(form, true, 'جاري الرفع والاعتماد...');
         const body = hasImageUpload ? await optimizedFormData(form) : new FormData(form);
         await api(url, {method:'POST', body});
         closeModal();
@@ -674,6 +675,7 @@ function showEditDriver() {
     <button id="editDriverSubmitBtn" class="success" ${i.receipt_photo ? '' : 'disabled'}>حفظ</button>
   </form>`;
   const form = document.getElementById('editDriverInvoiceForm');
+  prepareImageInputs(form);
   const receiptInput = form.querySelector('[name="receipt_photo"]');
   const submitButton = document.getElementById('editDriverSubmitBtn');
   receiptInput.addEventListener('change', () => {
@@ -682,8 +684,10 @@ function showEditDriver() {
   form.addEventListener('submit', async e => {
     e.preventDefault();
     try {
-      await api(`/api/invoices/${encodeURIComponent(i.invoice_no)}/edit-driver`, {method:'POST', body:new FormData(form)});
-      closeModal(); toast('تم التعديل'); await bootstrap();
+      setSubmitting(form, true, 'جاري الرفع والحفظ...');
+      const body = await optimizedFormData(form);
+      await api(`/api/invoices/${encodeURIComponent(i.invoice_no)}/edit-driver`, {method:'POST', body});
+      closeModal(); toast('تم التعديل'); bootstrap();
     } catch (error) { toast(error.message, true); }
   });
 }
@@ -1042,6 +1046,8 @@ function dateOnlyText(value){
 }
 
 
+const optimizedImageCache = new WeakMap();
+
 async function compressImageFileForUpload(file, maxSide=1280, quality=0.72) {
   if (!file || !file.type || !file.type.startsWith('image/')) return file;
   // الصور الصغيرة لا تحتاج إعادة ضغط.
@@ -1075,15 +1081,42 @@ async function compressImageFileForUpload(file, maxSide=1280, quality=0.72) {
 
 async function optimizedFormData(form) {
   const fd = new FormData(form);
-  const fileNames = ['receipt_photo','return_photo','photo','external_receipt'];
-  for (const name of fileNames) {
-    const input = form.querySelector(`[name="${name}"]`);
-    if (!input || !input.files || !input.files[0]) continue;
+  const inputs = [...form.querySelectorAll('input[type="file"]')].filter(x => x.name && x.files && x.files[0]);
+  await Promise.all(inputs.map(async input => {
     const original = input.files[0];
-    const optimized = await compressImageFileForUpload(original);
-    if (optimized !== original) fd.set(name, optimized, optimized.name);
-  }
+    let optimized = optimizedImageCache.get(original);
+    if (!optimized) {
+      optimized = await compressImageFileForUpload(original);
+      optimizedImageCache.set(original, optimized);
+    }
+    fd.set(input.name, optimized, optimized.name || original.name);
+  }));
+  if (fd.get('vehicle_id') === '') fd.delete('vehicle_id');
   return fd;
+}
+
+
+function prepareImageInputs(form) {
+  form.querySelectorAll('input[type="file"]').forEach(input => {
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      let hint = input.nextElementSibling;
+      if (!hint || !hint.classList?.contains('upload-size-hint')) {
+        hint = document.createElement('small');
+        hint.className = 'upload-size-hint';
+        input.insertAdjacentElement('afterend', hint);
+      }
+      hint.textContent = `جاري تجهيز الصورة ${(file.size/1024/1024).toFixed(1)} MB...`;
+      try {
+        const optimized = await compressImageFileForUpload(file);
+        optimizedImageCache.set(file, optimized);
+        hint.textContent = `جاهزة للرفع — ${((optimized?.size || file.size)/1024/1024).toFixed(2)} MB`;
+      } catch (_) {
+        hint.textContent = 'جاهزة للرفع';
+      }
+    });
+  });
 }
 
 function setSubmitting(form, active, label='جاري الاعتماد...') {

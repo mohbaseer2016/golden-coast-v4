@@ -488,7 +488,7 @@ def warehouse_update(
     request: Request,
     delivery_mode: str = Form("COMPANY_DRIVER"),
     driver_code: str = Form(""),
-    vehicle_id: int | None = Form(None),
+    vehicle_id: str = Form(""),
     load_status: str = Form(...),
     shortage_reason: str = Form(""),
     notes: str = Form(""),
@@ -525,7 +525,11 @@ def warehouse_update(
     if delivery_mode == "COMPANY_DRIVER":
         if not vehicle_id:
             raise HTTPException(status_code=400, detail="اختيار الدينة إجباري لسائق الشركة.")
-        vehicle = db.get(Vehicle, vehicle_id)
+        try:
+            vehicle_id_int = int(vehicle_id)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="اختيار الدينة إجباري لسائق الشركة.")
+        vehicle = db.get(Vehicle, vehicle_id_int)
         if not vehicle or not vehicle.active:
             raise HTTPException(status_code=400, detail="السيارة غير موجودة أو موقوفة.")
 
@@ -1044,7 +1048,7 @@ def edit_invoice_warehouse(
     invoice_no: str,
     request: Request,
     driver_code: str = Form(...),
-    vehicle_id: int = Form(...),
+    vehicle_id: str = Form(""),
     load_status: str = Form(...),
     shortage_reason: str = Form(""),
     notes: str = Form(""),
@@ -1062,7 +1066,11 @@ def edit_invoice_warehouse(
         User.role == "DRIVER",
         User.active == True,
     ))
-    vehicle = db.get(Vehicle, vehicle_id)
+    try:
+        vehicle_id_int = int(vehicle_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="اختر سيارة صحيحة.")
+    vehicle = db.get(Vehicle, vehicle_id_int)
     if not driver:
         raise HTTPException(status_code=400, detail="اختر سائقًا صحيحًا.")
     if not vehicle or not vehicle.active:
@@ -1086,7 +1094,7 @@ def edit_invoice_driver(
     invoice_no: str,
     request: Request,
     delivery_result: str = Form(...),
-    return_qty_declared: float = Form(0),
+    return_qty_declared: str = Form("0"),
     reason: str = Form(""),
     notes: str = Form(""),
     receipt_photo: UploadFile | None = File(None),
@@ -1111,10 +1119,14 @@ def edit_invoice_driver(
     returned = save_upload(return_photo, invoice_no, "return_driver_edit")
     if user["role"] == "DRIVER" and not (receipt or invoice.receipt_photo):
         raise HTTPException(status_code=400, detail="يجب رفع صورة الاستلام قبل اعتماد النتيجة.")
+    try:
+        return_qty_value = float(return_qty_declared or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="كمية المرتجع غير صحيحة.")
     invoice.delivery_result = delivery_result
     invoice.delivery_reason = reason.strip() or None
     invoice.driver_notes = notes.strip() or None
-    invoice.return_qty_declared = return_qty_declared
+    invoice.return_qty_declared = return_qty_value
     invoice.receipt_photo = receipt or invoice.receipt_photo
     invoice.driver_return_photo = returned or invoice.driver_return_photo
 
