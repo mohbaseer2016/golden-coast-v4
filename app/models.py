@@ -74,6 +74,7 @@ class Invoice(Base):
     customer: Mapped[str | None] = mapped_column(String(180), nullable=True)
     invoice_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     driver_code: Mapped[str] = mapped_column(String(80), default="", index=True)
+    delivery_mode: Mapped[str | None] = mapped_column(String(30), nullable=True)
     driver_name: Mapped[str] = mapped_column(String(150), default="")
     is_external_driver: Mapped[bool] = mapped_column(Boolean, default=False)
     vehicle_no: Mapped[str | None] = mapped_column(String(80), nullable=True)
