@@ -871,8 +871,10 @@ def warehouse_update(
     invoice.delivery_mode = None if full_warehouse_return else delivery_mode
     invoice.delivery_target = None
     if full_warehouse_return:
-        invoice.driver_code = None
-        invoice.driver_name = None
+        # driver_code and driver_name are NOT NULL in the existing database schema.
+        # A full warehouse return has no driver, so store empty strings instead of NULL.
+        invoice.driver_code = ""
+        invoice.driver_name = ""
         invoice.is_external_driver = False
         invoice.vehicle_no = None
     else:
