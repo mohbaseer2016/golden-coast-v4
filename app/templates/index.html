@@ -38,9 +38,11 @@
       <nav class="tabs">
         <button data-tab="queue" class="active">المعلقة عندي</button>
         <button data-tab="search">البحث والأرشيف</button>
+        <button id="documentsTab" data-tab="documents" class="hidden">المستندات</button>
         <button id="usersTab" data-tab="users" class="hidden">المستخدمون</button>
         <button id="vehiclesTab" data-tab="vehicles" class="hidden">السيارات</button>
         <button id="productsTab" data-tab="products" class="hidden">الأصناف</button>
+        <button id="salesRepsTab" data-tab="salesReps" class="hidden">المناديب</button>
         <button id="logsTab" data-tab="logs" class="hidden">الحركات</button>
       </nav>
 
@@ -88,6 +90,9 @@
             <option value="DRIVER_PENDING">مع السائق</option>
             <option value="POSTPONED">مؤجلة</option>
             <option value="RETURN_PENDING">مرتجع للمخزن</option>
+            <option value="CUSTOMER_RECEIPT_PENDING">بانتظار استلام العميل</option>
+            <option value="DELIVERY_DISCREPANCY_PENDING">فرق تسليم عند الموارد</option>
+            <option value="FINAL_REVIEW_PENDING">بانتظار استكمال الإقفال</option>
             <option value="DOCUMENT_PENDING">عند الموارد</option>
             <option value="CLOSED">مكتملة</option>
           </select>
@@ -117,7 +122,7 @@
         <div class="toolbar mobile-filter-panel">
   <button id="newUserBtn" class="success">+ مستخدم جديد</button>
   <input id="usersFilter" placeholder="بحث: اسم، مستخدم، دور، جوال">
-  <select id="usersRoleFilter"><option value="">كل الأدوار</option><option value="ADMIN">إدارة</option><option value="HR">موارد</option><option value="WAREHOUSE">مخزن</option><option value="DRIVER">سائق</option><option value="SALES_ACCOUNTANT">محاسب المبيعات</option></select>
+  <select id="usersRoleFilter"><option value="">كل الأدوار</option><option value="ADMIN">إدارة</option><option value="HR">موارد</option><option value="WAREHOUSE">مخزن</option><option value="DRIVER">سائق</option><option value="SALES_ACCOUNTANT">محاسب المبيعات</option><option value="SALES_REP">مندوب مبيعات</option></select>
   <select id="usersStatusFilter"><option value="">الكل</option><option value="active">فعال</option><option value="inactive">موقوف</option></select>
   <select id="usersSort"><option value="name">الاسم</option><option value="username">اسم المستخدم</option><option value="role">الدور</option></select>
 </div>
@@ -155,6 +160,44 @@
 </div>
         <div class="card table-wrap">
           <table><thead><tr><th>الصنف</th><th>الوحدات</th><th>الحالة</th><th>إجراءات</th></tr></thead><tbody id="productsBody"></tbody></table>
+        </div>
+      </section>
+
+      <section id="documentsSection" class="hidden">
+        <div class="toolbar mobile-filter-panel">
+          <select id="documentsCategory">
+            <option value="originals">أصول الفواتير</option>
+            <option value="customer_receipts">استلامات العملاء</option>
+            <option value="carrier_receipts">استلامات الناقل / مكتب النقل</option>
+            <option value="returns">مستندات المرتجعات</option>
+          </select>
+          <input id="documentsFilter" placeholder="بحث برقم الفاتورة أو العميل أو المندوب">
+          <select id="documentsSort">
+            <option value="date_desc">الأحدث أولاً</option>
+            <option value="date_asc">الأقدم أولاً</option>
+            <option value="invoice_asc">رقم الفاتورة تصاعدي</option>
+            <option value="invoice_desc">رقم الفاتورة تنازلي</option>
+          </select>
+          <button id="refreshDocumentsBtn" type="button">تحديث المستندات</button>
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead><tr><th>الفاتورة</th><th>العميل</th><th>المندوب</th><th>المستند</th><th>التاريخ</th><th>بواسطة</th><th></th></tr></thead>
+            <tbody id="documentsBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="salesRepsSection" class="hidden">
+        <div class="toolbar mobile-filter-panel">
+          <button id="newSalesRepBtn" class="success">+ إضافة مندوب</button>
+          <input id="salesRepsFilter" placeholder="بحث في المناديب">
+        </div>
+        <div class="card table-wrap">
+          <table>
+            <thead><tr><th>المندوب</th><th>الجوال</th><th>الحالة</th><th></th></tr></thead>
+            <tbody id="salesRepsBody"></tbody>
+          </table>
         </div>
       </section>
 

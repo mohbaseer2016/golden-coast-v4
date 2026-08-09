@@ -1,6 +1,6 @@
 'use strict';
 
-const state = {user:null, drivers:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], invoiceSequence:{start:null,max:null,missing:[],configured:false}, permissions:{screens:[],actions:[]}, permissionCatalog:{}, invoiceSequence:{start:null,max:null,missing:[],configured:false}, current:null};
+const state = {user:null, drivers:[], salesReps:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], documents:[], invoiceSequence:{start:null,max:null,missing:[],configured:false}, permissions:{screens:[],actions:[]}, permissionCatalog:{}, invoiceSequence:{start:null,max:null,missing:[],configured:false}, current:null};
 
 const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
 let inactivityTimer = null;
@@ -47,6 +47,12 @@ document.addEventListener('DOMContentLoaded', () => {
   bind('newUserBtn','click',showNewUser);
   bind('newVehicleBtn','click',showNewVehicle);
   bind('newProductBtn','click',showNewProduct);
+  bind('newSalesRepBtn','click',showNewSalesRep);
+  bind('salesRepsFilter','input',renderSalesReps);
+  bind('documentsCategory','change',loadDocuments);
+  bind('documentsFilter','input',renderDocuments);
+  bind('documentsSort','change',renderDocuments);
+  bind('refreshDocumentsBtn','click',loadDocuments);
   bind('saveSequenceStartBtn','click',saveInvoiceSequenceStart);
   bind('searchBtn','click',search);
   bind('closeModalBtn','click',closeModal);
@@ -113,7 +119,8 @@ async function bootstrap() {
     const data = await api('/api/bootstrap');
     state.user = data.user;
     resetInactivityTimer();
-    state.drivers = data.drivers;
+    state.drivers = data.drivers || [];
+    state.salesReps = data.sales_reps || [];
     state.vehicles = data.vehicles;
     state.users = data.users;
     state.logs = data.logs || [];
@@ -129,8 +136,10 @@ async function bootstrap() {
     renderInvoiceSequence();
     document.getElementById('newInvoiceBtn').classList.toggle('hidden', !state.permissions.actions.includes('invoice_create'));
     document.getElementById('usersTab').classList.toggle('hidden', !state.permissions.screens.includes('users'));
+    document.getElementById('documentsTab')?.classList.toggle('hidden', !['ADMIN','HR','SALES_ACCOUNTANT','SALES_REP'].includes(state.user.role));
     document.getElementById('vehiclesTab').classList.toggle('hidden', !state.permissions.screens.includes('vehicles'));
     document.getElementById('productsTab').classList.toggle('hidden', !state.permissions.screens.includes('products'));
+    document.getElementById('salesRepsTab')?.classList.toggle('hidden', state.user.role !== 'ADMIN');
     document.getElementById('logsTab').classList.toggle('hidden', state.user.role !== 'ADMIN');
 
     renderStats(data.stats);
@@ -139,6 +148,7 @@ async function bootstrap() {
     renderFilteredVehicles();
     renderFilteredLogs();
     renderFilteredProducts();
+    renderSalesReps();
     bindLiveFilterControls();
   } catch (error) {
     if (!error.message.includes('الجلسة')) console.error(error);
@@ -198,54 +208,113 @@ async function openInvoice(invoiceNo) {
 
 async function showInvoice(invoice) {
   document.getElementById('modalTitle').textContent = 'فاتورة ' + invoice.invoice_no;
-  let invoiceIssues=[];
+  let invoiceIssues=[]; let movements=[];
+  try { movements=await api(`/api/invoices/${encodeURIComponent(invoice.invoice_no)}/movement`); } catch(e) {}
   try { invoiceIssues=await api(`/api/invoices/${encodeURIComponent(invoice.invoice_no)}/issues`); } catch(e) {}
-  let html = `<div class="card">
-    <b>السائق:</b> ${esc(invoice.driver_name || 'لم يحدد')}<br>
-    <b>السيارة:</b> ${esc(invoice.vehicle_no || 'لم تحدد')}<br>
+
+  const modeNames={
+    COMPANY_DRIVER:'سائق من الشركة',
+    EXTERNAL_DRIVER:'سائق خارجي',
+    SALES_REP_SELF:'المندوب نفسه',
+    CUSTOMER_SELF:'العميل نفسه'
+  };
+  let html = `<div class="card invoice-summary">
+    <b>العميل:</b> ${esc(invoice.customer||'')}<br>
+    <b>المندوب:</b> ${esc(invoice.sales_rep_name||'لم يحدد')}<br>
+    <b>طريقة التوصيل:</b> ${esc(modeNames[invoice.delivery_mode]||'لم تحدد')}<br>
+    <b>السائق/المستلم:</b> ${esc(invoice.driver_name || 'لم يحدد')}<br>
+    <b>السيارة:</b> ${esc(invoice.vehicle_no || '—')}<br>
     <b>الحالة:</b> ${statusName(invoice.status)}
   </div>`;
 
-  if (invoice.receipt_photo) {
-    html += `<div class="receipt-photo-wrap">
-      <a href="${attr(invoice.receipt_photo)}" target="_blank" rel="noopener">
-        <img class="receipt-photo" src="${attr(invoice.receipt_photo)}" alt="صورة الاستلام">
-      </a>
-    </div>`;
+  html += goodsMovementHtml(movements);
+
+  const photos=[
+    ['استلام العميل', invoice.customer_receipt_photo],
+    ['استلام الناقل / مكتب النقل', invoice.carrier_receipt_photo],
+    ['أصل الفاتورة', invoice.original_document_photo],
+    ['صورة المرتجع', invoice.return_photo],
+  ].filter(x=>x[1]);
+  if(photos.length){
+    html += `<div class="document-preview-grid">${photos.map(([label,url])=>`
+      <a class="document-preview-card" href="${attr(url)}" target="_blank" rel="noopener">
+        <span>${esc(label)}</span><img src="${attr(url)}" alt="${esc(label)}">
+      </a>`).join('')}</div>`;
   }
+
+  let actionCount=0;
+  const addAction=(title,content)=>{
+    actionCount++;
+    html += `<div class="workflow-action"><h3>${title}</h3>${content}</div>`;
+  };
 
   if (['ADMIN','WAREHOUSE'].includes(state.user.role) && invoice.status === 'WAREHOUSE_PENDING') {
-    html += warehouseForm();
-  } else if (['ADMIN','WAREHOUSE'].includes(state.user.role) && invoice.status === 'RETURN_PENDING') {
-    html += returnForm(invoice, invoiceIssues);
-  } else if (['ADMIN','DRIVER'].includes(state.user.role) && ['DRIVER_PENDING','POSTPONED'].includes(invoice.status)) {
-    html += driverForm();
-  } else if (['ADMIN','HR'].includes(state.user.role) && invoice.status === 'DOCUMENT_PENDING' && invoice.delivery_mode === 'EXTERNAL_DRIVER' && !invoice.receipt_photo) {
-    html += externalDriverForm();
-  } else if (['ADMIN','SALES_ACCOUNTANT'].includes(state.user.role) && invoice.sales_return_required && !invoice.sales_return_reviewed && ['FINAL_REVIEW_PENDING','DOCUMENT_PENDING'].includes(invoice.status)) {
-    html += salesReturnReviewForm(invoice);
-  } else if (['ADMIN','HR'].includes(state.user.role) && !invoice.original_document_received && ['DOCUMENT_PENDING','FINAL_REVIEW_PENDING'].includes(invoice.status)) {
-    html += closeForm(invoice);
-  } else {
-    html += finalReviewSummary(invoice);
+    addAction('اعتماد المخزن', warehouseForm());
   }
 
-  html += '<hr><h3>التعديل</h3>';
-  if (state.user.role === 'ADMIN') {
-    html += `<button id="adminEditInvoiceBtn" class="warn">تعديل شامل</button>
-             <button id="deleteInvoiceBtn" class="danger">حذف الفاتورة</button>`;
-  } else if (state.user.role === 'HR' && invoice.status === 'WAREHOUSE_PENDING') {
-    html += `<button id="editHrBtn" class="warn">تعديل بيانات الموارد</button>`;
-  } else if (state.user.role === 'WAREHOUSE' && ['WAREHOUSE_PENDING','DRIVER_PENDING'].includes(invoice.status)) {
-    html += `<button id="editWarehouseBtn" class="warn">تعديل بيانات المخزن</button>`;
-  } else if (state.user.role === 'DRIVER' && ['DRIVER_PENDING','POSTPONED','RETURN_PENDING','DOCUMENT_PENDING'].includes(invoice.status)) {
-    html += `<button id="editDriverBtn" class="warn">تعديل نتيجة التسليم</button>`;
+  if (['ADMIN','WAREHOUSE'].includes(state.user.role) && invoice.status === 'RETURN_PENDING') {
+    addAction('استلام المرتجعات في المخزن', returnForm(invoice, invoiceIssues));
+  }
+
+  if (['ADMIN','DRIVER'].includes(state.user.role) && ['DRIVER_PENDING','POSTPONED'].includes(invoice.status)) {
+    addAction('اعتماد السائق', driverForm());
+  }
+
+  if (['ADMIN','SALES_REP'].includes(state.user.role) &&
+      invoice.customer_receipt_required && !invoice.customer_receipt_received) {
+    addAction('متابعة استلام العميل', customerReceiptForm(invoice));
+  }
+
+  if (['ADMIN','HR'].includes(state.user.role) &&
+      invoice.delivery_discrepancy_required && !invoice.delivery_discrepancy_reviewed) {
+    addAction('مراجعة فرق التسليم', deliveryDiscrepancyReviewForm(invoice));
+  }
+
+  if (['ADMIN','SALES_ACCOUNTANT'].includes(state.user.role) &&
+      invoice.sales_return_required && !invoice.sales_return_reviewed) {
+    addAction('اعتماد مردود المبيعات', salesReturnReviewForm(invoice, invoiceIssues));
+  }
+
+  if (['ADMIN','HR'].includes(state.user.role) &&
+      invoice.loaded_at && !invoice.original_document_received && invoice.status !== 'CLOSED') {
+    addAction('استلام أصل الفاتورة', closeForm(invoice));
+  }
+
+  html += finalReviewSummary(invoice);
+
+  if (['ADMIN','HR'].includes(state.user.role) && invoice.status === 'WAREHOUSE_PENDING') {
+    html += '<hr><h3>تعديل بيانات الفاتورة</h3>';
+    if(state.user.role==='ADMIN'){
+      html += `<button id="adminEditInvoiceBtn" class="warn">تعديل شامل</button>
+               <button id="deleteInvoiceBtn" class="danger">حذف الفاتورة</button>`;
+    }else{
+      html += `<button id="editHrBtn" class="warn">تعديل بيانات الموارد والمندوب</button>`;
+    }
+  } else if (state.user.role === 'ADMIN') {
+    html += `<hr><h3>إدارة الفاتورة</h3>
+      <button id="adminEditInvoiceBtn" class="warn">تعديل شامل</button>
+      <button id="deleteInvoiceBtn" class="danger">حذف الفاتورة</button>`;
   }
 
   document.getElementById('modalContent').innerHTML = html;
   openModal();
   bindModalForms();
   bindEditButtons();
+}
+
+function goodsMovementHtml(rows=[]) {
+  if (!rows.length) return `<div class="movement-card"><h3>حركة البضاعة</h3><div class="muted">لا توجد حركات مسجلة بعد.</div></div>`;
+  return `<div class="movement-card"><h3>حركة البضاعة</h3><div class="movement-timeline">${
+    rows.map(x=>`<div class="movement-item">
+      <div class="movement-dot"></div>
+      <div class="movement-body">
+        <div class="movement-head"><b>${esc(x.title)}</b><span>${dateTimeText(x.at)}</span></div>
+        ${x.user?`<div class="muted">بواسطة: ${esc(x.user)}</div>`:''}
+        ${x.detail?`<div>${esc(x.detail)}</div>`:''}
+        ${x.photo?`<a href="${attr(x.photo)}" target="_blank" rel="noopener">فتح الصورة / المستند</a>`:''}
+      </div>
+    </div>`).join('')
+  }</div></div>`;
 }
 
 function warehouseForm() {
@@ -256,63 +325,120 @@ function warehouseForm() {
     <label>طريقة التوصيل / الاستلام</label>
     <select id="deliveryMode" name="delivery_mode" required>
       <option value="COMPANY_DRIVER">سائق من الشركة</option>
-      <option value="EXTERNAL_DRIVER">سائق خارجي</option>
-      <option value="CUSTOMER_SELF">العميل نفسه يستلم</option>
+      <option value="EXTERNAL_DRIVER">سائق خارجي يستلم من المخزن</option>
+      <option value="SALES_REP_SELF">المندوب نفسه يوصل للعميل</option>
+      <option value="CUSTOMER_SELF">العميل نفسه يستلم من المخزن</option>
     </select>
-    <div id="companyDriverField"><label>سائق الشركة</label><select id="companyDriverSelect"><option value="">اختر</option>${companyDrivers}</select></div>
-    <div id="externalDriverField" class="hidden"><label>السائق الخارجي</label><select id="externalDriverSelect"><option value="">اختر</option>${externalDrivers}</select></div>
+
+    <div id="companyDriverField">
+      <label>سائق الشركة</label>
+      <select id="companyDriverSelect"><option value="">اختر</option>${companyDrivers}</select>
+    </div>
+
+    <div id="externalDriverField" class="hidden">
+      <label>السائق الخارجي</label>
+      <select id="externalDriverSelect"><option value="">اختر</option>${externalDrivers}</select>
+    </div>
+
     <input type="hidden" name="driver_code" id="warehouseDriverCode">
-    <div id="vehicleField"><label>الدينة / السيارة</label><select name="vehicle_id"><option value="">اختر</option>${vehicleOptions}</select></div>
-    <div id="customerReceiptField" class="hidden"><label>صورة الاستلام من العميل (إجباري)</label><input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif"></div>
-    <label>حالة التحميل</label><select id="loadStatus" name="load_status"><option>تم التحميل كامل</option><option>تم التحميل ناقص</option><option>مرفوض من المخزن</option></select>
-    <label>تاريخ ووقت التحميل</label><input name="loaded_at" type="datetime-local" required value="${localDateTimeValue()}">
-    <div id="warehouseIssues" class="hidden"><h3>الأصناف الناقصة / المرتجعة</h3><div id="warehouseIssueRows"></div><button type="button" class="secondary" id="addWarehouseIssue">+ إضافة صنف</button></div>
+
+    <div id="vehicleField">
+      <label>الدينة / السيارة</label>
+      <select name="vehicle_id"><option value="">اختر</option>${vehicleOptions}</select>
+    </div>
+
+    <div id="handoffReceiptField" class="hidden">
+      <label id="handoffReceiptLabel">صورة الاستلام</label>
+      <input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
+      <small id="handoffReceiptHelp"></small>
+    </div>
+
+    <div id="selectedRepInfo" class="card hidden"></div>
+
+    <label>حالة التحميل</label>
+    <select id="loadStatus" name="load_status">
+      <option>تم التحميل كامل</option>
+      <option>تم التحميل ناقص</option>
+      <option>مرفوض من المخزن</option>
+    </select>
+
+    <label>تاريخ ووقت التحميل</label>
+    <input name="loaded_at" type="datetime-local" required value="${localDateTimeValue()}">
+
+    <div id="warehouseIssues" class="hidden">
+      <h3>نقص التحميل</h3>
+      <p class="muted">سجّل كل صنف لم يتم تحميله. سيبقى كمرتجع تحميل مستقل حتى يؤكده المخزن.</p>
+      <div id="warehouseIssueRows"></div>
+      <button type="button" class="secondary" id="addWarehouseIssue">+ إضافة صنف ناقص</button>
+    </div>
+
     <label>سبب النقص أو الرفض</label><input name="shortage_reason">
-    <label>صورة التحميل (اختياري)</label><input type="file" name="photo" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
+    <label>صورة التحميل (اختياري)</label>
+    <input type="file" name="photo" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
     <label>ملاحظات</label><textarea name="notes"></textarea>
-    <input type="hidden" name="issues_json" value="[]"><button>اعتماد</button>
+    <input type="hidden" name="issues_json" value="[]">
+    <button>اعتماد</button>
   </form>`;
 }
 
+
 function driverForm() {
   return `<form id="driverForm">
+    <label>تم التسليم إلى</label>
+    <select id="driverDeliveryTarget" name="delivery_target">
+      <option value="CUSTOMER">العميل مباشرة</option>
+      <option value="TRANSPORT_OFFICE">مكتب / شركة نقل</option>
+    </select>
+    <div id="transportOfficeField" class="hidden">
+      <label>اسم مكتب / شركة النقل</label>
+      <input name="transport_office_name" placeholder="مثال: مكتب النجم للنقل">
+    </div>
+
     <label>نتيجة التسليم</label>
-    <select name="delivery_result">
+    <select id="driverDeliveryResult" name="delivery_result">
       <option>تم كامل</option>
       <option>تم جزئي</option>
       <option>رفض كامل</option>
       <option>مؤجل</option>
       <option>العميل مغلق</option>
     </select>
-    <label>وصف كمية المرتجع</label><input name="return_qty_declared" type="text" placeholder="مثال: ٢٠ تنك مرتجع">\n    <div id="driverIssues"><h3>تفاصيل أصناف المرتجع</h3><div id="driverIssueRows"></div><button type="button" class="secondary" id="addDriverIssue">+ إضافة صنف مرتجع</button></div>\n    <input type="hidden" name="issues_json" value="[]">
-    <label>السبب</label><input name="reason">
-    <label>صورة الاستلام</label><input id="driverReceiptPhoto" name="receipt_photo" type="file" accept="image/*" required>
-    <label>صورة المرتجع</label><input name="return_photo" type="file" accept="image/*">
-    <label>ملاحظات</label><textarea name="notes"></textarea>
-    <button id="driverSubmitBtn" disabled>اعتماد</button>
-  </form>`;
-}
 
+    <label>وصف كمية المرتجع</label>
+    <input name="return_qty_declared" type="text" placeholder="مثال: ٢٠ تنك مرتجع">
 
-function externalDriverForm() {
-  return `<form id="externalDriverForm">
-    <div class="card"><b>السائق الخارجي:</b> الموارد تسجل نتيجة التسليم وترفع صورة الاستلام المرسلة من السائق.</div>
-    <label>نتيجة التسليم</label><select name="delivery_result"><option>تم كامل</option><option>تم جزئي</option><option>رفض كامل</option><option>مؤجل</option><option>العميل مغلق</option></select>
-    <label>وصف كمية المرتجع</label><input name="return_qty_declared" type="text" placeholder="مثال: ٢٠ تنك مرتجع">
+    <div id="driverIssues">
+      <h3>مرتجع العميل</h3>
+      <div id="driverIssueRows"></div>
+      <button type="button" class="secondary" id="addDriverIssue">+ إضافة صنف مرتجع</button>
+    </div>
     <input type="hidden" name="issues_json" value="[]">
+
     <label>السبب</label><input name="reason">
-    <label>صورة الاستلام (إجباري)</label><input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif" required>
-    <label>صورة المرتجع (اختياري)</label><input name="return_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
-    <label>ملاحظات</label><textarea name="notes"></textarea><button>اعتماد نتيجة السائق الخارجي</button>
+
+    <label id="driverReceiptLabel">صورة استلام العميل</label>
+    <input id="driverReceiptPhoto" name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif">
+
+    <label>صورة المرتجع (اختياري)</label>
+    <input name="return_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif">
+
+    <label>ملاحظات</label><textarea name="notes"></textarea>
+    <button id="driverSubmitBtn">اعتماد</button>
   </form>`;
 }
+
+
 
 function returnForm(invoice, allIssues=[]) {
-  const items=allIssues.filter(x=>x.stage==='DRIVER' && x.issue_type==='مرتجع');
-  const rows=items.length ? items.map(x=>`
-    <div class="return-check-row" data-id="${x.id}">
+  const items=allIssues.filter(x =>
+    (x.stage==='WAREHOUSE' && ['نقص تحميل','ناقص'].includes(x.issue_type)) ||
+    (x.stage==='DRIVER' && ['مرتجع عميل','مرتجع'].includes(x.issue_type))
+  );
+  const rows=items.length ? items.map(x=>{
+    const source=x.stage==='WAREHOUSE'?'نقص التحميل':'مرتجع العميل';
+    return `<div class="return-check-row" data-id="${x.id}">
+      <div class="return-source-badge">${source}</div>
       <div class="return-item-title"><b>${esc(x.product_name)}</b> — ${esc(x.quantity)} ${esc(x.unit||'')}</div>
-      <label>هل الكمية المستلمة مطابقة لما سجله السائق؟</label>
+      <label>هل استلم المخزن نفس الكمية المسجلة؟</label>
       <select class="return-match" required>
         <option value="">اختر</option>
         <option value="yes">نعم، مطابق</option>
@@ -321,60 +447,113 @@ function returnForm(invoice, allIssues=[]) {
       <div class="return-actual hidden">
         <label>الكمية المستلمة فعليًا</label>
         <input class="return-actual-qty" type="text" placeholder="اكتب الكمية الفعلية بنفس الوحدة">
-        <label>ملاحظة الاختلاف (اختياري)</label>
+        <label>سبب / ملاحظة الاختلاف</label>
         <input class="return-item-note" type="text">
       </div>
-    </div>`).join('') :
-    '<div class="card">لا توجد أصناف مرتجع مسجلة من السائق. لا يمكن اعتماد المرتجع حتى يسجل السائق الأصناف.</div>';
+    </div>`;
+  }).join('') : '<div class="card">لا توجد أصناف مرتجع مسجلة لهذه الفاتورة.</div>';
 
   return `<form id="returnForm">
-    <div class="card"><b>مطابقة مرتجع السائق</b><br>راجع كل صنف والكمية التي سجلها السائق، ثم أكد المطابقة أو اكتب الكمية الفعلية.</div>
+    <div class="card"><b>مطابقة المرتجعات</b><br>نقص التحميل ومرتجع العميل يظهران منفصلين، ويؤكد المخزن كل صنف على حدة.</div>
     <div id="returnCheckItems">${rows}</div>
     <input type="hidden" name="issue_results_json" value="[]">
     <label>صورة المرتجع (اختياري)</label>
     <input name="photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
     <label>ملاحظات المخزن</label><textarea name="notes"></textarea>
-    <button ${items.length?'':'disabled'}>تأكيد استلام المرتجع</button>
+    <button ${items.length?'':'disabled'}>تأكيد استلام المرتجعات</button>
   </form>`;
 }
 
+
 function closeForm(invoice) {
-  const externalField = invoice.is_external_driver
-    ? '<label>صورة الاستلام المرسلة من السائق الخارجي</label><input name="external_receipt" type="file" accept="image/*">'
-    : '';
   return `<form id="closeForm">
+    <div class="card"><b>استلام أصل الفاتورة</b><br>صوّر أصل الفاتورة عند وصوله للموارد ثم أكد الاستلام.</div>
     <label>استلام أصل الفاتورة</label>
     <select name="original_received"><option>نعم</option><option>لا</option></select>
-    ${externalField}
+    <label>صورة أصل الفاتورة (إجباري)</label>
+    <input name="original_document_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif" required>
     <label>ملاحظات</label><textarea name="notes"></textarea>
     <button class="success">تأكيد استلام أصل الفاتورة</button>
   </form>`;
 }
 
 
-function salesReturnReviewForm(invoice) {
-  return `<form id="salesReturnReviewForm">
-    <div class="card">
-      <b>مراجعة مردود المبيعات</b><br>
-      تأكد من تفاصيل المردود التي سجلها السائق وما استلمه المخزن، ثم اعتمد.
+
+function customerReceiptForm(invoice) {
+  const context = invoice.delivery_mode==='EXTERNAL_DRIVER'
+    ? 'تابع السائق الخارجي حتى تحصل على صورة استلام العميل النهائي.'
+    : `تابع مكتب النقل${invoice.transport_office_name?` (${esc(invoice.transport_office_name)})`:''} حتى تحصل على صورة استلام العميل النهائي.`;
+  return `<form id="customerReceiptForm">
+    <div class="card"><b>متابعة استلام العميل</b><br>${context}</div>
+    <label>مطابقة استلام العميل</label>
+    <select id="customerReceiptMatch" name="match_status">
+      <option value="MATCH">مطابق — استلم كامل</option>
+      <option value="SHORT">يوجد نقص</option>
+      <option value="OVER">يوجد زيادة</option>
+    </select>
+    <div id="customerReceiptIssues" class="hidden">
+      <h3>تفاصيل الفرق</h3>
+      <div id="customerReceiptIssueRows"></div>
+      <button type="button" class="secondary" id="addCustomerReceiptIssue">+ إضافة صنف فرق</button>
     </div>
+    <input type="hidden" name="issues_json" value="[]">
+    <label>صورة استلام العميل النهائي (إجباري)</label>
+    <input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif" required>
+    <label>ملاحظات</label><textarea name="notes"></textarea>
+    <button class="success">اعتماد استلام العميل</button>
+  </form>`;
+}
+
+function deliveryDiscrepancyReviewForm(invoice) {
+  return `<form id="deliveryDiscrepancyReviewForm">
+    <div class="card danger-soft"><b>يوجد فرق في تسليم العميل</b><br>
+      تم تسجيل الفرق بواسطة المندوب. هذه الحالة تذهب للموارد للمراجعة ولا ترجع للمخزن.
+    </div>
+    <label>ملاحظات الموارد / الإجراء المتخذ</label>
+    <textarea name="notes" placeholder="مثال: تم تحميل الفرق على السائق الخارجي"></textarea>
+    <button class="success">تمت مراجعة فرق التسليم</button>
+  </form>`;
+}
+
+function salesReturnReviewForm(invoice, allIssues=[]) {
+  const items=allIssues.filter(x=>['WAREHOUSE','DRIVER'].includes(x.stage));
+  const details=items.length?`<div class="return-accounting-list">${
+    items.map(x=>`<div class="return-accounting-item">
+      <b>${x.stage==='WAREHOUSE'?'نقص تحميل':'مرتجع عميل'} — ${esc(x.product_name)}</b><br>
+      المسجل: ${esc(x.quantity)} ${esc(x.unit||'')} —
+      المستلم فعليًا: ${esc(x.actual_quantity||x.quantity)} ${esc(x.unit||'')}
+      ${x.warehouse_match===false?'<strong> — يوجد اختلاف</strong>':''}
+    </div>`).join('')
+  }</div>`:'<div class="muted">لا توجد تفاصيل أصناف.</div>';
+  return `<form id="salesReturnReviewForm">
+    <div class="card"><b>مراجعة مردود المبيعات</b><br>
+      راجع نقص التحميل ومرتجع العميل وما أكده المخزن فعليًا.
+    </div>
+    ${details}
     <label>ملاحظات محاسب المبيعات</label>
     <textarea name="notes"></textarea>
     <button class="success">اعتماد المردود</button>
   </form>`;
 }
 
+
 function finalReviewSummary(invoice) {
-  const original = invoice.original_document_received ? '✓ تم استلام أصل الفاتورة' : '⏳ أصل الفاتورة لم يُستلم بعد';
-  const sales = !invoice.sales_return_required ? 'لا يوجد مردود يحتاج اعتماد'
-    : (invoice.sales_return_reviewed ? '✓ تم اعتماد المردود من محاسب المبيعات' : '⏳ المردود بانتظار محاسب المبيعات');
+  const original = invoice.original_document_received ? '✓ تم استلام أصل الفاتورة' : '⏳ أصل الفاتورة لم يُستلم';
+  const customer = !invoice.customer_receipt_required ? '✓ لا توجد متابعة استلام إضافية'
+    : (invoice.customer_receipt_received ? '✓ تم استلام صورة العميل النهائية' : '⏳ بانتظار استلام العميل النهائي');
+  const sales = !invoice.sales_return_required ? '✓ لا يوجد مردود يحتاج محاسب المبيعات'
+    : (invoice.sales_return_reviewed ? '✓ تم اعتماد المردود' : '⏳ بانتظار محاسب المبيعات');
+  const discrepancy = !invoice.delivery_discrepancy_required ? '✓ لا يوجد فرق تسليم'
+    : (invoice.delivery_discrepancy_reviewed ? '✓ تمت مراجعة فرق التسليم' : '⚠️ فرق التسليم بانتظار الموارد');
   return `<div class="card final-review-summary">
     <h3>حالة الإقفال</h3>
     <div>${original}</div>
+    <div>${customer}</div>
     <div>${sales}</div>
-    ${invoice.sales_return_notes ? `<div><b>ملاحظات المردود:</b> ${esc(invoice.sales_return_notes)}</div>` : ''}
+    <div>${discrepancy}</div>
   </div>`;
 }
+
 
 function bindModalForms() {
   document.querySelectorAll('.return-match').forEach(sel=>{
@@ -386,10 +565,11 @@ function bindModalForms() {
   const forms = [
     ['warehouseForm', 'warehouse'],
     ['driverForm', 'driver'],
-    ['externalDriverForm', 'external-delivery'],
     ['returnForm', 'return'],
     ['closeForm', 'close'],
     ['salesReturnReviewForm', 'sales-return-review'],
+    ['customerReceiptForm', 'customer-receipt'],
+    ['deliveryDiscrepancyReviewForm', 'delivery-discrepancy-review'],
     ['invoiceForm', 'invoices'],
     ['userForm', 'users'],
     ['vehicleForm', 'vehicles'],
@@ -404,29 +584,62 @@ function bindModalForms() {
     if (id === 'warehouseForm') setupWarehouseForm(form);
     if (id === 'driverForm') {
       setupIssueEditor(form, 'driverIssueRows', 'addDriverIssue', false);
-      const receiptInput = form.querySelector('[name="receipt_photo"]');
-      const submitButton = form.querySelector('button[type="submit"], button:not([type])');
-      const refreshDriverSubmit = () => {
-        submitButton.disabled = !(receiptInput.files && receiptInput.files.length > 0);
+      const receiptInput=form.querySelector('[name="receipt_photo"]');
+      const submitButton=form.querySelector('button[type="submit"], button:not([type])');
+      const result=form.querySelector('#driverDeliveryResult');
+      const target=form.querySelector('#driverDeliveryTarget');
+      const label=form.querySelector('#driverReceiptLabel');
+      const officeField=form.querySelector('#transportOfficeField');
+      const officeInput=form.querySelector('[name="transport_office_name"]');
+
+      const syncDriverForm=()=>{
+        const postponed=['مؤجل','العميل مغلق'].includes(result.value);
+        const office=target.value==='TRANSPORT_OFFICE';
+        receiptInput.required=!postponed;
+        officeField.classList.toggle('hidden',!office);
+        officeInput.required=office;
+        label.textContent=office ? 'صورة استلام مكتب / شركة النقل' : 'صورة استلام العميل';
+        submitButton.disabled=false;
       };
-      receiptInput.addEventListener('change', () => {
-        refreshDriverSubmit();
-        const file = receiptInput.files && receiptInput.files[0];
-        let hint = form.querySelector('.upload-size-hint');
-        if (!hint) {
-          hint = document.createElement('small');
-          hint.className = 'upload-size-hint';
-          receiptInput.insertAdjacentElement('afterend', hint);
-        }
-        hint.textContent = file ? `حجم الصورة قبل التحسين: ${(file.size/1024/1024).toFixed(1)} MB — سيتم تصغيرها تلقائياً قبل الرفع.` : '';
-      });
-      refreshDriverSubmit();
+      result.addEventListener('change',syncDriverForm);
+      target.addEventListener('change',syncDriverForm);
+      syncDriverForm();
+    }
+
+    if (id === 'customerReceiptForm') {
+      const match=form.querySelector('#customerReceiptMatch');
+      const box=form.querySelector('#customerReceiptIssues');
+      const sync=()=>box.classList.toggle('hidden',match.value==='MATCH');
+      match.addEventListener('change',sync);
+      setupIssueEditor(form,'customerReceiptIssueRows','addCustomerReceiptIssue',false);
+      sync();
     }
 
     form.addEventListener('submit', async event => {
       event.preventDefault();
       try {
         serializeIssueRows(form);
+        if(id==='warehouseForm'){
+          const loadStatus=form.querySelector('[name="load_status"]')?.value;
+          const issueRows=[...form.querySelectorAll('.issue-row')];
+          if(loadStatus==='تم التحميل ناقص' && issueRows.length===0){
+            toast('أضف الصنف والكمية والوحدة الخاصة بالنقص قبل الاعتماد.',true); return;
+          }
+        }
+        if(id==='driverForm'){
+          const result=form.querySelector('[name="delivery_result"]')?.value;
+          const issueRows=[...form.querySelectorAll('.issue-row')];
+          if(['تم جزئي','رفض كامل'].includes(result) && issueRows.length===0){
+            toast('أضف أصناف مرتجع العميل قبل الاعتماد.',true); return;
+          }
+        }
+        if(id==='customerReceiptForm'){
+          const match=form.querySelector('[name="match_status"]')?.value;
+          const issueRows=[...form.querySelectorAll('.issue-row')];
+          if(['SHORT','OVER'].includes(match) && issueRows.length===0){
+            toast('أضف تفاصيل الصنف وكمية فرق التسليم.',true); return;
+          }
+        }
         let url;
         if (id === 'invoiceForm') url = '/api/invoices';
         else if (id === 'userForm') url = '/api/users';
@@ -434,7 +647,7 @@ function bindModalForms() {
         else if (id === 'editUserForm') url = '/api/users/' + encodeURIComponent(form.dataset.username);
         else url = `/api/invoices/${encodeURIComponent(state.current.invoice_no)}/${path}`;
 
-        const hasImageUpload = ['driverForm','externalDriverForm','warehouseForm','returnForm','closeForm'].includes(id);
+        const hasImageUpload = ['driverForm','warehouseForm','returnForm','closeForm','customerReceiptForm'].includes(id);
         if (hasImageUpload) setSubmitting(form, true, 'جاري الرفع والاعتماد...');
         const body = hasImageUpload ? await optimizedFormData(form) : new FormData(form);
         await api(url, {method:'POST', body});
@@ -450,11 +663,118 @@ function bindModalForms() {
   });
 }
 
+
+
+async function loadDocuments(){
+  const category=document.getElementById('documentsCategory')?.value||'originals';
+  try{
+    state.documents=await api(`/api/documents?category=${encodeURIComponent(category)}`);
+    renderDocuments();
+  }catch(e){toast(e.message,true);}
+}
+
+function renderDocuments(){
+  const body=document.getElementById('documentsBody');
+  if(!body) return;
+  const q=(document.getElementById('documentsFilter')?.value||'').trim().toLowerCase();
+  const sort=document.getElementById('documentsSort')?.value||'date_desc';
+  let rows=(state.documents||[]).filter(x=>!q||[
+    x.invoice_no,x.customer,x.sales_rep_name,x.label,x.by
+  ].join(' ').toLowerCase().includes(q));
+
+  const invoiceNum=x=>{
+    const n=Number(String(x.invoice_no||'').replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+    return Number.isFinite(n)?n:0;
+  };
+  rows=[...rows].sort((a,b)=>{
+    if(sort==='date_asc') return new Date(a.date||0)-new Date(b.date||0);
+    if(sort==='invoice_asc') return invoiceNum(a)-invoiceNum(b);
+    if(sort==='invoice_desc') return invoiceNum(b)-invoiceNum(a);
+    return new Date(b.date||0)-new Date(a.date||0);
+  });
+
+  body.innerHTML=rows.length?rows.map(x=>`<tr>
+    <td data-label="الفاتورة"><button class="link-button doc-open-invoice" data-no="${attr(x.invoice_no)}">${esc(x.invoice_no)}</button></td>
+    <td data-label="العميل">${esc(x.customer||'')}</td>
+    <td data-label="المندوب">${esc(x.sales_rep_name||'')}</td>
+    <td data-label="المستند">${esc(x.label||'')}</td>
+    <td data-label="التاريخ">${dateTimeText(x.date)}</td>
+    <td data-label="بواسطة">${esc(x.by||'')}</td>
+    <td data-label="">${x.photo?`<a class="button-link" href="${attr(x.photo)}" target="_blank" rel="noopener">فتح الصورة</a>`:'بدون صورة'}</td>
+  </tr>`).join(''):'<tr><td colspan="7">لا توجد مستندات في هذا القسم.</td></tr>';
+  body.querySelectorAll('.doc-open-invoice').forEach(b=>b.addEventListener('click',()=>openInvoice(b.dataset.no)));
+}
+
+function renderSalesReps(){
+  const body=document.getElementById('salesRepsBody');
+  if(!body) return;
+  const q=(document.getElementById('salesRepsFilter')?.value||'').trim().toLowerCase();
+  const rows=(state.salesReps||[]).filter(r=>!q||[r.name,r.phone].join(' ').toLowerCase().includes(q));
+  body.innerHTML=rows.length?rows.map(r=>`<tr>
+    <td data-label="المندوب">${esc(r.name)}</td>
+    <td data-label="الجوال">${esc(r.phone||'')}</td>
+    <td data-label="الحالة">${r.active?'فعال':'موقوف'}</td>
+    <td data-label="">
+      <button class="edit-sales-rep" data-id="${r.id}">تعديل</button>
+      <button class="toggle-sales-rep ${r.active?'warn':'success'}" data-id="${r.id}">${r.active?'توقيف':'تفعيل'}</button>
+      <button class="delete-sales-rep danger" data-id="${r.id}">حذف</button>
+    </td>
+  </tr>`).join(''):'<tr><td colspan="4">لا يوجد مناديب.</td></tr>';
+
+  body.querySelectorAll('.edit-sales-rep').forEach(btn=>btn.addEventListener('click',()=>showEditSalesRep(Number(btn.dataset.id))));
+  body.querySelectorAll('.toggle-sales-rep').forEach(btn=>btn.addEventListener('click',async()=>{
+    try{await api(`/api/sales-reps/${btn.dataset.id}/toggle`,{method:'POST'});toast('تم تحديث حالة المندوب');await bootstrap();}
+    catch(e){toast(e.message,true);}
+  }));
+  body.querySelectorAll('.delete-sales-rep').forEach(btn=>btn.addEventListener('click',async()=>{
+    if(!confirm('حذف المندوب؟')) return;
+    try{await api(`/api/sales-reps/${btn.dataset.id}/delete`,{method:'POST'});toast('تم حذف المندوب');await bootstrap();}
+    catch(e){toast(e.message,true);}
+  }));
+}
+
+function showEditSalesRep(id){
+  const rep=state.salesReps.find(r=>r.id===id); if(!rep)return;
+  document.getElementById('modalTitle').textContent='تعديل المندوب';
+  document.getElementById('modalContent').innerHTML=`<form id="editSalesRepForm">
+    <label>اسم المندوب</label><input name="name" required value="${attr(rep.name)}">
+    <label>الجوال</label><input name="phone" value="${attr(rep.phone||'')}">
+    <button class="success">حفظ</button>
+  </form>`;
+  openModal();
+  const form=document.getElementById('editSalesRepForm');
+  form.addEventListener('submit',async e=>{
+    e.preventDefault();
+    try{await api(`/api/sales-reps/${id}/update`,{method:'POST',body:new FormData(form)});closeModal();toast('تم تعديل المندوب');await bootstrap();}
+    catch(err){toast(err.message,true);}
+  });
+}
+
+
+function showNewSalesRep(){
+  document.getElementById('modalTitle').textContent='إضافة مندوب';
+  document.getElementById('modalContent').innerHTML=`<form id="salesRepForm">
+    <label>اسم المندوب</label><input name="name" required>
+    <label>الجوال (اختياري)</label><input name="phone">
+    <button class="success">إضافة المندوب</button>
+  </form>`;
+  openModal();
+  const form=document.getElementById('salesRepForm');
+  form.addEventListener('submit',async e=>{
+    e.preventDefault();
+    try{await api('/api/sales-reps',{method:'POST',body:new FormData(form)});closeModal();toast('تمت إضافة المندوب');await bootstrap();}
+    catch(err){toast(err.message,true);}
+  });
+}
+
 function showNewInvoice() {
   document.getElementById('modalTitle').textContent = 'إدخال فاتورة';
   document.getElementById('modalContent').innerHTML = `<form id="invoiceForm">
     <label>رقم الفاتورة</label><input name="invoice_no" required>
-    <label>اسم العميل (اختياري)</label><input name="customer">\n    <label>تاريخ الفاتورة</label><input name="invoice_date" type="date" required value="${new Date().toISOString().slice(0,10)}">
+    <label>اسم العميل (اختياري)</label><input name="customer">
+    <label>المندوب (اختياري ويمكن إضافته لاحقًا)</label>
+    <select name="sales_rep_id"><option value="">بدون مندوب الآن</option>${state.salesReps.filter(r=>r.active).map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select>
+    <label>تاريخ الفاتورة</label><input name="invoice_date" type="date" required value="${new Date().toISOString().slice(0,10)}">
     <label>ملاحظات</label><textarea name="notes"></textarea>
     <button class="success">حفظ وإرسال للمخزن</button>
   </form>`;
@@ -516,8 +836,12 @@ function showNewUser() {
       <option value="HR">الموارد</option>
       <option value="WAREHOUSE">المخزن</option>
       <option value="DRIVER">السائق</option>
+      <option value="SALES_ACCOUNTANT">محاسب المبيعات</option>
+      <option value="SALES_REP">مندوب مبيعات</option>
     </select>
     <label>رمز السائق</label><input name="driver_code">
+    <label>ربط بمندوب (لحساب المندوب فقط)</label>
+    <select name="sales_rep_id"><option value="">بدون ربط</option>${state.salesReps.filter(r=>r.active).map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select>
     <label>الجوال</label><input name="phone">
     <button class="success">إنشاء</button>
   </form>`;
@@ -536,11 +860,12 @@ function showEditUser(username) {
     <label>رمز دخول جديد (اتركه فارغًا دون تغيير)</label><input name="password" type="password">
     <label>الدور</label>
     <select name="role">
-      ${['ADMIN','HR','WAREHOUSE','DRIVER'].map(role =>
+      ${['ADMIN','HR','WAREHOUSE','DRIVER','SALES_ACCOUNTANT','SALES_REP'].map(role =>
         `<option value="${role}" ${user.role === role ? 'selected' : ''}>${roleName(role)}</option>`
       ).join('')}
     </select>
     <label>رمز السائق</label><input name="driver_code" value="${attr(user.driver_code || '')}">
+    <label>ربط بمندوب</label><select name="sales_rep_id"><option value="">بدون ربط</option>${state.salesReps.map(r=>`<option value="${r.id}" ${r.id===user.sales_rep_id?'selected':''}>${esc(r.name)}</option>`).join('')}</select>
     <label>الجوال</label><input name="phone" value="${attr(user.phone || '')}">
     <label>الحالة</label>
     <select name="active">
@@ -615,7 +940,8 @@ function showEditHr() {
   document.getElementById('modalTitle').textContent = 'تعديل بيانات الموارد';
   document.getElementById('modalContent').innerHTML = `<form id="editHrInvoiceForm">
     <label>رقم الفاتورة</label><input name="new_invoice_no" value="${attr(i.invoice_no)}" required>
-    <label>العميل</label><input name="customer" value="${attr(i.customer || '')}">
+    <label>العميل</label><input name="customer" value="${attr(i.customer || '')}"> 
+    <label>المندوب</label><select name="sales_rep_id"><option value="">بدون مندوب</option>${state.salesReps.filter(r=>r.active || r.id===i.sales_rep_id).map(r=>`<option value="${r.id}" ${r.id===i.sales_rep_id?'selected':''}>${esc(r.name)}</option>`).join('')}</select>
     <label>ملاحظات الموارد</label><textarea name="notes">${esc(i.hr_notes || '')}</textarea>
     <button class="success">حفظ</button>
   </form>`;
@@ -697,11 +1023,12 @@ function showAdminEditInvoice() {
   const driverOptions = state.drivers.map(d =>
     `<option value="${attr(d.driver_code)}" ${i.driver_code === d.driver_code ? 'selected' : ''}>${esc(d.name)}</option>`
   ).join('');
-  const statuses = ['WAREHOUSE_PENDING','DRIVER_PENDING','POSTPONED','RETURN_PENDING','DOCUMENT_PENDING','CLOSED'];
+  const statuses = ['WAREHOUSE_PENDING','DRIVER_PENDING','POSTPONED','RETURN_PENDING','CUSTOMER_RECEIPT_PENDING','DELIVERY_DISCREPANCY_PENDING','DOCUMENT_PENDING','FINAL_REVIEW_PENDING','CLOSED'];
   document.getElementById('modalTitle').textContent = 'تعديل شامل للفاتورة';
   document.getElementById('modalContent').innerHTML = `<form id="adminEditInvoiceForm">
     <label>رقم الفاتورة</label><input name="new_invoice_no" value="${attr(i.invoice_no)}" required>
     <label>العميل</label><input name="customer" value="${attr(i.customer || '')}">
+    <label>المندوب</label><select name="sales_rep_id"><option value="">بدون مندوب</option>${state.salesReps.filter(r=>r.active || r.id===i.sales_rep_id).map(r=>`<option value="${r.id}" ${r.id===i.sales_rep_id?'selected':''}>${esc(r.name)}</option>`).join('')}</select>
     <label>السائق</label><select name="driver_code"><option value="">بدون تغيير</option>${driverOptions}</select>
     <label>السيارة</label><input name="vehicle_no" value="${attr(i.vehicle_no || '')}">
     <label>الحالة</label><select name="status">${statuses.map(s => `<option value="${s}" ${i.status===s?'selected':''}>${statusName(s)}</option>`).join('')}</select>
@@ -758,9 +1085,10 @@ function dateTimeText(value) {
 }
 
 function switchTab(tab) {
-  ['queue','search','users','vehicles','products','logs'].forEach(name => {
+  ['queue','search','documents','users','vehicles','products','salesReps','logs'].forEach(name => {
     document.getElementById(name + 'Section').classList.toggle('hidden', name !== tab);
   });
+  if(tab==='documents') loadDocuments();
   document.querySelectorAll('[data-tab]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
   });
@@ -784,7 +1112,7 @@ function toast(message, error=false) {
 }
 
 function roleName(role) {
-  return {ADMIN:'الإدارة',HR:'الموارد البشرية',WAREHOUSE:'أمين المخازن',DRIVER:'السائق'}[role] || role;
+  return {ADMIN:'الإدارة',HR:'الموارد البشرية',WAREHOUSE:'أمين المخازن',DRIVER:'السائق',SALES_ACCOUNTANT:'محاسب المبيعات',SALES_REP:'مندوب مبيعات'}[role] || role;
 }
 
 function statusName(status) {
@@ -795,6 +1123,8 @@ function statusName(status) {
     RETURN_PENDING:'مرتجع للمخزن',
     DOCUMENT_PENDING:'عند الموارد',
     FINAL_REVIEW_PENDING:'بانتظار استكمال الإقفال',
+    CUSTOMER_RECEIPT_PENDING:'بانتظار استلام العميل',
+    DELIVERY_DISCREPANCY_PENDING:'فرق تسليم عند الموارد',
     CLOSED:'مكتملة'
   }[status] || status;
 }
@@ -844,26 +1174,61 @@ function serializeIssueRows(form){
   const h=form.querySelector('[name="issues_json"]'); if(h) h.value=JSON.stringify(rows);
 }
 function setupWarehouseForm(form){
-  const mode=form.querySelector('#deliveryMode'), companyField=form.querySelector('#companyDriverField'), externalField=form.querySelector('#externalDriverField');
-  const companySelect=form.querySelector('#companyDriverSelect'), externalSelect=form.querySelector('#externalDriverSelect'), driverCode=form.querySelector('#warehouseDriverCode');
-  const vehicleField=form.querySelector('#vehicleField'), vehicleSelect=form.querySelector('[name="vehicle_id"]');
-  const customerReceiptField=form.querySelector('#customerReceiptField'), customerReceipt=form.querySelector('[name="receipt_photo"]');
-  const loadStatus=form.querySelector('#loadStatus'), issuesBox=form.querySelector('#warehouseIssues');
+  const mode=form.querySelector('#deliveryMode');
+  const companyField=form.querySelector('#companyDriverField');
+  const externalField=form.querySelector('#externalDriverField');
+  const companySelect=form.querySelector('#companyDriverSelect');
+  const externalSelect=form.querySelector('#externalDriverSelect');
+  const driverCode=form.querySelector('#warehouseDriverCode');
+  const vehicleField=form.querySelector('#vehicleField');
+  const vehicleSelect=form.querySelector('[name="vehicle_id"]');
+  const receiptField=form.querySelector('#handoffReceiptField');
+  const receiptInput=form.querySelector('[name="receipt_photo"]');
+  const receiptLabel=form.querySelector('#handoffReceiptLabel');
+  const receiptHelp=form.querySelector('#handoffReceiptHelp');
+  const repInfo=form.querySelector('#selectedRepInfo');
+  const loadStatus=form.querySelector('#loadStatus');
+  const issuesBox=form.querySelector('#warehouseIssues');
+
   const syncMode=()=>{
     const v=mode.value;
     companyField.classList.toggle('hidden',v!=='COMPANY_DRIVER');
     externalField.classList.toggle('hidden',v!=='EXTERNAL_DRIVER');
     vehicleField.classList.toggle('hidden',v!=='COMPANY_DRIVER');
-    customerReceiptField.classList.toggle('hidden',v!=='CUSTOMER_SELF');
-    companySelect.required=v==='COMPANY_DRIVER'; externalSelect.required=v==='EXTERNAL_DRIVER';
-    vehicleSelect.required=v==='COMPANY_DRIVER'; customerReceipt.required=v==='CUSTOMER_SELF';
+
+    const needsReceipt=['EXTERNAL_DRIVER','CUSTOMER_SELF'].includes(v);
+    receiptField.classList.toggle('hidden',!needsReceipt);
+    receiptInput.required=needsReceipt;
+
+    companySelect.required=v==='COMPANY_DRIVER';
+    externalSelect.required=v==='EXTERNAL_DRIVER';
+    vehicleSelect.required=v==='COMPANY_DRIVER';
+
+    if(v==='EXTERNAL_DRIVER'){
+      receiptLabel.textContent='صورة استلام السائق الخارجي من المخزن (إجباري)';
+      receiptHelp.textContent='هذه تثبت تسليم المخزن للبضاعة للسائق الخارجي؛ استلام العميل النهائي يرفعه المندوب لاحقًا.';
+    }else if(v==='CUSTOMER_SELF'){
+      receiptLabel.textContent='صورة استلام العميل من المخزن (إجباري)';
+      receiptHelp.textContent='يعتبر هذا استلام العميل النهائي.';
+    }
+
     driverCode.value=v==='COMPANY_DRIVER'?companySelect.value:(v==='EXTERNAL_DRIVER'?externalSelect.value:'');
     if(v!=='COMPANY_DRIVER') vehicleSelect.value='';
+
+    const needsRep=['EXTERNAL_DRIVER','SALES_REP_SELF'].includes(v);
+    repInfo.classList.toggle('hidden',!needsRep);
+    if(needsRep){
+      repInfo.innerHTML=state.current?.sales_rep_name
+        ? `<b>المندوب:</b> ${esc(state.current.sales_rep_name)}`
+        : '<b>تنبيه:</b> لم يتم تحديد مندوب للفواتير. عدّل الفاتورة وحدد المندوب قبل الاعتماد.';
+    }
   };
+
   [mode,companySelect,externalSelect].forEach(el=>el.addEventListener('change',syncMode));
   const syncLoad=()=>issuesBox.classList.toggle('hidden',loadStatus.value!=='تم التحميل ناقص');
-  loadStatus.addEventListener('change',syncLoad); syncMode(); syncLoad();
-  setupIssueEditor(form,'warehouseIssueRows','addWarehouseIssue',true);
+  loadStatus.addEventListener('change',syncLoad);
+  syncMode(); syncLoad();
+  setupIssueEditor(form,'warehouseIssueRows','addWarehouseIssue',false);
 }
 async function showDashboardBucket(bucket,title){
   if(bucket==='mine'){switchTab('queue');return;}
@@ -1160,31 +1525,43 @@ function renderInvoiceSequence(){
   const warning=document.getElementById('sequenceWarning');
   if(!box || !warning) return;
 
-  const canConfigure=['ADMIN','HR'].includes(state.user?.role);
+  const canConfigure=['ADMIN','SALES_ACCOUNTANT'].includes(state.user?.role);
   box.classList.toggle('hidden',!canConfigure);
-  if(input && state.invoiceSequence?.start) input.value=state.invoiceSequence.start;
+  if(!canConfigure){warning.classList.add('hidden');return;}
 
   const seq=state.invoiceSequence||{};
+  if(input && seq.start) input.value=seq.start;
+
   if(!seq.configured){
-    warning.classList.remove('hidden');
-    warning.innerHTML='⚠️ لم يتم تحديد بداية تسلسل الفواتير. حدد أول رقم تريد أن يبدأ النظام التدقيق منه.';
+    warning.classList.remove('hidden','sequence-ok');
+    warning.innerHTML='⚠️ لم يتم تحديد بداية تسلسل الفواتير. حدد أول رقم يبدأ منه التدقيق.';
     return;
   }
 
   const missing=seq.missing||[];
-  if(!missing.length){
-    warning.classList.remove('hidden');
-    warning.innerHTML=`✓ تسلسل الفواتير سليم من رقم <b>${seq.start}</b>${seq.max?` حتى <b>${seq.max}</b>`:''}.`;
-    warning.classList.add('sequence-ok');
+  if(!missing.length || seq.acknowledged){
+    warning.classList.add('hidden');
     return;
   }
 
   warning.classList.remove('hidden','sequence-ok');
-  const preview=missing.slice(0,40).join('، ');
-  const more=missing.length>40?` … و${missing.length-40} رقم آخر`:'';
-  warning.innerHTML=`⚠️ <b>يوجد ${missing.length} رقم فاتورة مفقود في التسلسل</b><br>
-    من ${seq.start} إلى ${seq.max}: ${preview}${more}`;
+  const preview=missing.slice(0,60).join('، ');
+  const more=missing.length>60?` … و${missing.length-60} رقم آخر`:'';
+  warning.innerHTML=`⚠️ <b>تدقيق التسلسل الأسبوعي: ${missing.length} رقم مفقود</b><br>
+    الفحص من <b>${seq.start}</b> إلى أعلى فاتورة موجودة <b>${seq.max}</b>.<br>
+    ${preview}${more}<br>
+    <button type="button" id="ackSequenceBtn" class="secondary">تمت المراجعة — إخفاء حتى الأسبوع القادم</button>`;
+  document.getElementById('ackSequenceBtn')?.addEventListener('click',ackInvoiceSequence);
 }
+
+async function ackInvoiceSequence(){
+  try{
+    state.invoiceSequence=await api('/api/settings/invoice-sequence/ack',{method:'POST'});
+    renderInvoiceSequence();
+    toast('تمت مراجعة التسلسل. سيظهر التنبيه من جديد في الأسبوع القادم إذا بقي نقص.');
+  }catch(e){toast(e.message,true);}
+}
+
 
 async function saveInvoiceSequenceStart(){
   const input=document.getElementById('sequenceStartInput');

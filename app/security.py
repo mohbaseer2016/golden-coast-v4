@@ -20,6 +20,7 @@ def set_session(response, user):
         "name": user.name,
         "role": user.role,
         "driver_code": user.driver_code or "",
+        "sales_rep_id": user.sales_rep_id,
     })
     response.set_cookie(
         "gc_session",

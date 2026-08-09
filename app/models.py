@@ -13,6 +13,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(150))
     role: Mapped[str] = mapped_column(String(40), index=True)
     driver_code: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    sales_rep_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     is_external_driver: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -56,6 +57,17 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+
+class SalesRep(Base):
+    __tablename__ = "sales_reps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(150), unique=True, index=True)
+    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Vehicle(Base):
     __tablename__ = "vehicles"
 
@@ -75,12 +87,29 @@ class Invoice(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     invoice_no: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     customer: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    sales_rep_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    sales_rep_name: Mapped[str | None] = mapped_column(String(150), nullable=True)
     invoice_date: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     driver_code: Mapped[str] = mapped_column(String(80), default="", index=True)
     delivery_mode: Mapped[str | None] = mapped_column(String(30), nullable=True)
     driver_name: Mapped[str] = mapped_column(String(150), default="")
     is_external_driver: Mapped[bool] = mapped_column(Boolean, default=False)
     vehicle_no: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    delivery_target: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    transport_office_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    carrier_receipt_photo: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_receipt_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    customer_receipt_received: Mapped[bool] = mapped_column(Boolean, default=False)
+    customer_receipt_photo: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    customer_receipt_received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    customer_receipt_received_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    customer_receipt_match: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    customer_receipt_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivery_discrepancy_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    delivery_discrepancy_reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    delivery_discrepancy_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    delivery_discrepancy_reviewed_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    delivery_discrepancy_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[str] = mapped_column(String(60), index=True, default="WAREHOUSE_PENDING")
     current_owner: Mapped[str] = mapped_column(String(60), index=True, default="WAREHOUSE")
@@ -117,6 +146,9 @@ class Invoice(Base):
     sales_return_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     original_document_received: Mapped[bool] = mapped_column(Boolean, default=False)
+    original_document_received_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    original_document_received_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    original_document_photo: Mapped[str | None] = mapped_column(String(255), nullable=True)
     closure_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
