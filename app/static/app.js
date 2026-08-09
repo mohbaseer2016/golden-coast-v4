@@ -359,7 +359,7 @@ function warehouseForm() {
     <select id="loadStatus" name="load_status">
       <option>تم التحميل كامل</option>
       <option>تم التحميل ناقص</option>
-      <option>مرفوض من المخزن</option>
+      <option>مرتجع كامل من المخزن</option>
     </select>
 
     <label>تاريخ ووقت التحميل</label>
@@ -372,9 +372,10 @@ function warehouseForm() {
       <button type="button" class="secondary" id="addWarehouseIssue">+ إضافة صنف ناقص</button>
     </div>
 
-    <label>سبب النقص أو الرفض</label><input name="shortage_reason">
-    <label>صورة التحميل (اختياري)</label>
-    <input type="file" name="photo" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
+    <label id="warehouseReasonLabel">سبب النقص</label><input id="warehouseReason" name="shortage_reason">
+    <label id="warehousePhotoLabel">صورة التحميل (اختياري)</label>
+    <input id="warehousePhoto" type="file" name="photo" accept="image/*,.jpg,.jpeg,.png,.webp,.gif,.bmp,.tif,.tiff,.heic,.heif,.avif">
+    <small id="warehouseFullReturnHelp" class="hidden">في المرتجع الكامل لا يوجد سائق أو سيارة. اكتب السبب وارفع صورة مستند المرتجع، ثم تتابع الموارد أصل المستند ومحاسب المبيعات المردود بشكل مستقل.</small>
     <label>ملاحظات</label><textarea name="notes"></textarea>
     <input type="hidden" name="issues_json" value="[]">
     <button>اعتماد</button>
@@ -624,6 +625,13 @@ function bindModalForms() {
           const issueRows=[...form.querySelectorAll('.issue-row')];
           if(loadStatus==='تم التحميل ناقص' && issueRows.length===0){
             toast('أضف الصنف والكمية والوحدة الخاصة بالنقص قبل الاعتماد.',true); return;
+          }
+          if(loadStatus==='مرتجع كامل من المخزن'){
+            const reason=form.querySelector('[name="shortage_reason"]')?.value.trim();
+            const returnPhoto=form.querySelector('[name="photo"]')?.files?.length;
+            if(!reason){toast('سبب المرتجع الكامل من المخزن إجباري.',true);return;}
+            if(!returnPhoto){toast('صورة مستند المرتجع الكامل من المخزن إجبارية.',true);return;}
+            form.querySelector('[name="delivery_mode"]')?.removeAttribute('disabled');
           }
         }
         if(id==='driverForm'){
@@ -969,7 +977,7 @@ function showEditWarehouse() {
     <label>السيارة</label><select name="vehicle_id">${vehicleOptions}</select>
     <label>حالة التحميل</label>
     <select name="load_status">
-      ${['تم التحميل كامل','تم التحميل ناقص','مرفوض من المخزن'].map(x => `<option ${i.load_status===x?'selected':''}>${x}</option>`).join('')}
+      ${['تم التحميل كامل','تم التحميل ناقص','مرتجع كامل من المخزن'].map(x => `<option ${i.load_status===x?'selected':''}>${x}</option>`).join('')}
     </select>
     <label>سبب النقص</label><input name="shortage_reason" value="${attr(i.warehouse_shortage_reason || '')}">
     <label>ملاحظات المخزن</label><textarea name="notes">${esc(i.warehouse_notes || '')}</textarea>
@@ -1189,20 +1197,27 @@ function setupWarehouseForm(form){
   const repInfo=form.querySelector('#selectedRepInfo');
   const loadStatus=form.querySelector('#loadStatus');
   const issuesBox=form.querySelector('#warehouseIssues');
+  const reasonInput=form.querySelector('#warehouseReason');
+  const reasonLabel=form.querySelector('#warehouseReasonLabel');
+  const warehousePhoto=form.querySelector('#warehousePhoto');
+  const warehousePhotoLabel=form.querySelector('#warehousePhotoLabel');
+  const fullReturnHelp=form.querySelector('#warehouseFullReturnHelp');
 
   const syncMode=()=>{
     const v=mode.value;
-    companyField.classList.toggle('hidden',v!=='COMPANY_DRIVER');
-    externalField.classList.toggle('hidden',v!=='EXTERNAL_DRIVER');
-    vehicleField.classList.toggle('hidden',v!=='COMPANY_DRIVER');
+    const fullReturn=loadStatus.value==='مرتجع كامل من المخزن';
+    companyField.classList.toggle('hidden',fullReturn || v!=='COMPANY_DRIVER');
+    externalField.classList.toggle('hidden',fullReturn || v!=='EXTERNAL_DRIVER');
+    vehicleField.classList.toggle('hidden',fullReturn || v!=='COMPANY_DRIVER');
+    mode.disabled=fullReturn;
 
-    const needsReceipt=['EXTERNAL_DRIVER','CUSTOMER_SELF'].includes(v);
+    const needsReceipt=!fullReturn && ['EXTERNAL_DRIVER','CUSTOMER_SELF'].includes(v);
     receiptField.classList.toggle('hidden',!needsReceipt);
     receiptInput.required=needsReceipt;
 
-    companySelect.required=v==='COMPANY_DRIVER';
-    externalSelect.required=v==='EXTERNAL_DRIVER';
-    vehicleSelect.required=v==='COMPANY_DRIVER';
+    companySelect.required=!fullReturn && v==='COMPANY_DRIVER';
+    externalSelect.required=!fullReturn && v==='EXTERNAL_DRIVER';
+    vehicleSelect.required=!fullReturn && v==='COMPANY_DRIVER';
 
     if(v==='EXTERNAL_DRIVER'){
       receiptLabel.textContent='صورة استلام السائق الخارجي من المخزن (إجباري)';
@@ -1215,7 +1230,7 @@ function setupWarehouseForm(form){
     driverCode.value=v==='COMPANY_DRIVER'?companySelect.value:(v==='EXTERNAL_DRIVER'?externalSelect.value:'');
     if(v!=='COMPANY_DRIVER') vehicleSelect.value='';
 
-    const needsRep=['EXTERNAL_DRIVER','SALES_REP_SELF'].includes(v);
+    const needsRep=!fullReturn && ['EXTERNAL_DRIVER','SALES_REP_SELF'].includes(v);
     repInfo.classList.toggle('hidden',!needsRep);
     if(needsRep){
       repInfo.innerHTML=state.current?.sales_rep_name
@@ -1225,9 +1240,18 @@ function setupWarehouseForm(form){
   };
 
   [mode,companySelect,externalSelect].forEach(el=>el.addEventListener('change',syncMode));
-  const syncLoad=()=>issuesBox.classList.toggle('hidden',loadStatus.value!=='تم التحميل ناقص');
+  const syncLoad=()=>{
+    const fullReturn=loadStatus.value==='مرتجع كامل من المخزن';
+    issuesBox.classList.toggle('hidden',loadStatus.value!=='تم التحميل ناقص');
+    reasonInput.required=fullReturn;
+    warehousePhoto.required=fullReturn;
+    reasonLabel.textContent=fullReturn?'سبب المرتجع الكامل من المخزن (إجباري)':'سبب النقص';
+    warehousePhotoLabel.textContent=fullReturn?'صورة مستند المرتجع (إجباري)':'صورة التحميل (اختياري)';
+    fullReturnHelp.classList.toggle('hidden',!fullReturn);
+    syncMode();
+  };
   loadStatus.addEventListener('change',syncLoad);
-  syncMode(); syncLoad();
+  syncLoad();
   setupIssueEditor(form,'warehouseIssueRows','addWarehouseIssue',false);
 }
 async function showDashboardBucket(bucket,title){

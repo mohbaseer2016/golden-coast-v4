@@ -364,8 +364,9 @@ def goods_movement_timeline(db: Session, invoice: Invoice) -> list[dict]:
     add("CREATE", "إدخال الفاتورة", invoice.created_at, invoice.created_by,
         f"العميل: {invoice.customer or '-'}" + (f" — المندوب: {invoice.sales_rep_name}" if invoice.sales_rep_name else ""))
 
-    add("WAREHOUSE", "تحميل المخزن", invoice.loaded_at, invoice.warehouse_user or invoice.updated_by,
-        invoice.load_status or "", invoice.warehouse_photo)
+    warehouse_title = "مرتجع كامل من المخزن" if invoice.load_status == "مرتجع كامل من المخزن" else "تحميل المخزن"
+    add("WAREHOUSE", warehouse_title, invoice.loaded_at, invoice.warehouse_user or invoice.updated_by,
+        (invoice.warehouse_shortage_reason or invoice.load_status or "") if invoice.load_status == "مرتجع كامل من المخزن" else (invoice.load_status or ""), invoice.warehouse_photo)
 
     warehouse_items = db.scalars(select(InvoiceIssueItem).where(
         InvoiceIssueItem.invoice_no == invoice.invoice_no,
@@ -799,7 +800,9 @@ def warehouse_update(
     if delivery_mode not in allowed_modes:
         raise HTTPException(status_code=400, detail="طريقة التوصيل غير صحيحة.")
 
-    if delivery_mode in ["EXTERNAL_DRIVER", "SALES_REP_SELF"] and not invoice.sales_rep_id:
+    full_warehouse_return = load_status == "مرتجع كامل من المخزن"
+
+    if not full_warehouse_return and delivery_mode in ["EXTERNAL_DRIVER", "SALES_REP_SELF"] and not invoice.sales_rep_id:
         raise HTTPException(
             status_code=400,
             detail="حدد مندوب الفاتورة أولًا من تعديل بيانات الفاتورة قبل اعتماد هذا النوع من التوصيل.",
@@ -807,7 +810,7 @@ def warehouse_update(
 
     driver = None
     vehicle = None
-    if delivery_mode in ["COMPANY_DRIVER", "EXTERNAL_DRIVER"]:
+    if not full_warehouse_return and delivery_mode in ["COMPANY_DRIVER", "EXTERNAL_DRIVER"]:
         if not driver_code:
             raise HTTPException(status_code=400, detail="اختر السائق.")
         driver = db.scalar(select(User).where(
@@ -818,7 +821,7 @@ def warehouse_update(
         if not driver:
             raise HTTPException(status_code=400, detail="السائق غير موجود أو موقوف.")
 
-    if delivery_mode == "COMPANY_DRIVER":
+    if not full_warehouse_return and delivery_mode == "COMPANY_DRIVER":
         if not vehicle_id:
             raise HTTPException(status_code=400, detail="اختيار الدينة إجباري لسائق الشركة.")
         try:
@@ -829,10 +832,10 @@ def warehouse_update(
         if not vehicle or not vehicle.active:
             raise HTTPException(status_code=400, detail="السيارة غير موجودة أو موقوفة.")
 
-    handoff_photo = save_upload(receipt_photo, invoice_no, "warehouse_handoff")
-    if delivery_mode == "CUSTOMER_SELF" and not handoff_photo:
+    handoff_photo = None if full_warehouse_return else save_upload(receipt_photo, invoice_no, "warehouse_handoff")
+    if not full_warehouse_return and delivery_mode == "CUSTOMER_SELF" and not handoff_photo:
         raise HTTPException(status_code=400, detail="صورة استلام العميل إجبارية عندما يستلم من المخزن.")
-    if delivery_mode == "EXTERNAL_DRIVER" and not handoff_photo:
+    if not full_warehouse_return and delivery_mode == "EXTERNAL_DRIVER" and not handoff_photo:
         raise HTTPException(status_code=400, detail="صورة استلام السائق الخارجي من المخزن إجبارية.")
 
     # Parse shortage rows before changing the invoice.
@@ -853,22 +856,34 @@ def warehouse_update(
         if product and quantity and unit:
             valid_issue_rows.append((product, quantity, unit))
 
+    if full_warehouse_return:
+        if not shortage_reason.strip():
+            raise HTTPException(status_code=400, detail="سبب المرتجع الكامل من المخزن إجباري.")
+        if photo is None or not getattr(photo, "filename", ""):
+            raise HTTPException(status_code=400, detail="صورة مستند المرتجع الكامل من المخزن إجبارية.")
+
     if load_status == "تم التحميل ناقص" and not valid_issue_rows:
         raise HTTPException(
             status_code=400,
             detail="عند التحميل الناقص يجب تحديد الصنف والوحدة والكمية التي لم تُحمّل.",
         )
 
-    invoice.delivery_mode = delivery_mode
+    invoice.delivery_mode = None if full_warehouse_return else delivery_mode
     invoice.delivery_target = None
-    invoice.driver_code = driver.driver_code if driver else (
-        "SALES_REP_SELF" if delivery_mode == "SALES_REP_SELF" else "CUSTOMER_SELF"
-    )
-    invoice.driver_name = driver.name if driver else (
-        invoice.sales_rep_name if delivery_mode == "SALES_REP_SELF" else "العميل نفسه"
-    )
-    invoice.is_external_driver = delivery_mode == "EXTERNAL_DRIVER"
-    invoice.vehicle_no = f"{vehicle.name} - {vehicle.plate_no}" if vehicle else None
+    if full_warehouse_return:
+        invoice.driver_code = None
+        invoice.driver_name = None
+        invoice.is_external_driver = False
+        invoice.vehicle_no = None
+    else:
+        invoice.driver_code = driver.driver_code if driver else (
+            "SALES_REP_SELF" if delivery_mode == "SALES_REP_SELF" else "CUSTOMER_SELF"
+        )
+        invoice.driver_name = driver.name if driver else (
+            invoice.sales_rep_name if delivery_mode == "SALES_REP_SELF" else "العميل نفسه"
+        )
+        invoice.is_external_driver = delivery_mode == "EXTERNAL_DRIVER"
+        invoice.vehicle_no = f"{vehicle.name} - {vehicle.plate_no}" if vehicle else None
     invoice.warehouse_user = user["username"]
     invoice.load_status = load_status
     invoice.warehouse_shortage_reason = shortage_reason.strip() or None
@@ -896,8 +911,16 @@ def warehouse_update(
     invoice.delivery_discrepancy_required = False
     invoice.delivery_discrepancy_reviewed = False
 
-    if load_status == "مرفوض من المخزن":
-        invoice.status, invoice.current_owner = "DOCUMENT_PENDING", "HR"
+    if full_warehouse_return:
+        # No driver is involved. Warehouse attaches the return document and reason.
+        invoice.return_received = True
+        invoice.return_photo = invoice.warehouse_photo
+        invoice.return_notes = shortage_reason.strip()
+        invoice.return_received_at = invoice.loaded_at
+        invoice.sales_return_required = True
+        invoice.sales_return_reviewed = False
+        invoice.delivery_result = "مرتجع كامل من المخزن — لم يتم تحميل البضاعة"
+        invoice.status, invoice.current_owner = "FINAL_REVIEW_PENDING", "MULTI"
     elif delivery_mode == "COMPANY_DRIVER":
         invoice.status, invoice.current_owner = "DRIVER_PENDING", "DRIVER"
     elif delivery_mode == "EXTERNAL_DRIVER":
@@ -927,6 +950,7 @@ def warehouse_update(
     audit(db, "WAREHOUSE_UPDATE", user["username"], invoice_no, {
         "delivery_mode": delivery_mode,
         "driver": driver.name if driver else invoice.driver_name,
+        "full_warehouse_return": full_warehouse_return,
         "vehicle": invoice.vehicle_no,
         "load_status": load_status,
         "shortage_items": len(valid_issue_rows),
