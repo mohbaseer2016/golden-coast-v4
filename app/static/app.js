@@ -312,7 +312,17 @@ function bindModalForms() {
       const refreshDriverSubmit = () => {
         submitButton.disabled = !(receiptInput.files && receiptInput.files.length > 0);
       };
-      receiptInput.addEventListener('change', refreshDriverSubmit);
+      receiptInput.addEventListener('change', () => {
+        refreshDriverSubmit();
+        const file = receiptInput.files && receiptInput.files[0];
+        let hint = form.querySelector('.upload-size-hint');
+        if (!hint) {
+          hint = document.createElement('small');
+          hint.className = 'upload-size-hint';
+          receiptInput.insertAdjacentElement('afterend', hint);
+        }
+        hint.textContent = file ? `حجم الصورة قبل التحسين: ${(file.size/1024/1024).toFixed(1)} MB — سيتم تصغيرها تلقائياً قبل الرفع.` : '';
+      });
       refreshDriverSubmit();
     }
 
@@ -327,11 +337,16 @@ function bindModalForms() {
         else if (id === 'editUserForm') url = '/api/users/' + encodeURIComponent(form.dataset.username);
         else url = `/api/invoices/${encodeURIComponent(state.current.invoice_no)}/${path}`;
 
-        await api(url, {method:'POST', body:new FormData(form)});
+        const hasImageUpload = ['driverForm','warehouseForm','returnForm','closeForm'].includes(id);
+        if (hasImageUpload) setSubmitting(form, true, id === 'driverForm' ? 'جاري رفع الصورة والاعتماد...' : 'جاري الحفظ...');
+        const body = hasImageUpload ? await optimizedFormData(form) : new FormData(form);
+        await api(url, {method:'POST', body});
         closeModal();
         toast('تم الحفظ');
-        await bootstrap();
+        // حدّث البيانات بعد إغلاق النافذة حتى يشعر المستخدم بالاستجابة فوراً.
+        bootstrap();
       } catch (error) {
+        setSubmitting(form, false);
         toast(error.message, true);
       }
     });
@@ -906,4 +921,63 @@ function dateOnlyText(value){
   const d=new Date(s);
   if(Number.isNaN(d.getTime())) return esc(s.slice(0,10));
   return d.toLocaleDateString('ar-YE',{year:'numeric',month:'2-digit',day:'2-digit'});
+}
+
+
+async function compressImageFileForUpload(file, maxSide=1280, quality=0.72) {
+  if (!file || !file.type || !file.type.startsWith('image/')) return file;
+  // الصور الصغيرة لا تحتاج إعادة ضغط.
+  if (file.size <= 900 * 1024) return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(1, Math.round(bitmap.width * scale));
+    const height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d', {alpha:false});
+    ctx.drawImage(bitmap, 0, 0, width, height);
+    if (bitmap.close) bitmap.close();
+
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', quality));
+    if (!blob) return file;
+    // لا نستبدل الملف إذا لم نحصل فعلاً على حجم أصغر.
+    if (blob.size >= file.size) return file;
+
+    const baseName = (file.name || 'image').replace(/\.[^.]+$/, '');
+    return new File([blob], `${baseName}.jpg`, {type:'image/jpeg', lastModified:Date.now()});
+  } catch (_) {
+    // HEIC وبعض الصيغ قد لا يستطيع المتصفح فكها؛ نرسل الأصل للخادم.
+    return file;
+  }
+}
+
+async function optimizedFormData(form) {
+  const fd = new FormData(form);
+  const fileNames = ['receipt_photo','return_photo','photo','external_receipt'];
+  for (const name of fileNames) {
+    const input = form.querySelector(`[name="${name}"]`);
+    if (!input || !input.files || !input.files[0]) continue;
+    const original = input.files[0];
+    const optimized = await compressImageFileForUpload(original);
+    if (optimized !== original) fd.set(name, optimized, optimized.name);
+  }
+  return fd;
+}
+
+function setSubmitting(form, active, label='جاري الاعتماد...') {
+  const btn = form.querySelector('button[type="submit"], button:not([type])');
+  if (!btn) return;
+  if (active) {
+    btn.dataset.oldText = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add('is-loading');
+    btn.textContent = label;
+  } else {
+    btn.classList.remove('is-loading');
+    btn.textContent = btn.dataset.oldText || 'اعتماد';
+  }
 }

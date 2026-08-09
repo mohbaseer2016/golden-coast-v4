@@ -28,9 +28,9 @@ class SupabaseStorage:
         except (UnidentifiedImageError, OSError) as exc:
             raise ValueError("الملف المرفوع ليس صورة صالحة.") from exc
 
-        image.thumbnail((1600, 1600))
+        image.thumbnail((1280, 1280))
         output = io.BytesIO()
-        image.save(output, format="JPEG", quality=72, optimize=True)
+        image.save(output, format="JPEG", quality=68, optimize=False)
         return output.getvalue()
 
     def upload_image(self, invoice_no: str, kind: str, raw: bytes) -> str:
@@ -50,7 +50,7 @@ class SupabaseStorage:
         upload_url = f"{self.supabase_url}/storage/v1/object/{self.bucket}/{encoded_path}"
 
         try:
-            response = httpx.post(upload_url, content=payload, headers=headers, timeout=60.0)
+            response = httpx.post(upload_url, content=payload, headers=headers, timeout=25.0)
         except httpx.RequestError as exc:
             raise RuntimeError(f"تعذر الاتصال بـ Supabase Storage: {exc}") from exc
 
