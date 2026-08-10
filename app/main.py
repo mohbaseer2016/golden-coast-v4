@@ -1741,17 +1741,22 @@ def documents_archive(
         if category == "originals":
             if not inv.original_document_received:
                 continue
+            # Legacy compatibility: older versions sometimes stored the photographed
+            # original invoice in receipt_photo. Display that existing object only;
+            # never copy it or upload another file.
+            original_photo = inv.original_document_photo or inv.receipt_photo
             data.append({
-                "invoice_no": inv.invoice_no, "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
+                "invoice_no": str(inv.invoice_no or ""), "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
                 "date": inv.original_document_received_at.isoformat() if inv.original_document_received_at else None,
-                "by": inv.original_document_received_by, "photo": inv.original_document_photo,
+                "by": inv.original_document_received_by, "photo": original_photo,
                 "label": "أصل الفاتورة",
+                "legacy_photo": bool(not inv.original_document_photo and inv.receipt_photo),
             })
         elif category == "returns":
             if not (inv.return_received or inv.sales_return_reviewed):
                 continue
             data.append({
-                "invoice_no": inv.invoice_no, "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
+                "invoice_no": str(inv.invoice_no or ""), "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
                 "date": (inv.sales_return_reviewed_at or inv.return_received_at).isoformat() if (inv.sales_return_reviewed_at or inv.return_received_at) else None,
                 "by": inv.sales_return_reviewed_by or inv.updated_by, "photo": inv.return_photo or inv.driver_return_photo,
                 "label": "مستند المرتجع",
@@ -1761,7 +1766,7 @@ def documents_archive(
             if not photo:
                 continue
             data.append({
-                "invoice_no": inv.invoice_no, "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
+                "invoice_no": str(inv.invoice_no or ""), "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
                 "date": (inv.customer_receipt_received_at or inv.delivered_at).isoformat() if (inv.customer_receipt_received_at or inv.delivered_at) else None,
                 "by": inv.customer_receipt_received_by or inv.driver_name, "photo": photo,
                 "label": "استلام العميل",
@@ -1770,7 +1775,7 @@ def documents_archive(
             if not inv.carrier_receipt_photo:
                 continue
             data.append({
-                "invoice_no": inv.invoice_no, "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
+                "invoice_no": str(inv.invoice_no or ""), "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
                 "date": (inv.delivered_at or inv.loaded_at).isoformat() if (inv.delivered_at or inv.loaded_at) else None,
                 "by": inv.driver_name or inv.warehouse_user, "photo": inv.carrier_receipt_photo,
                 "label": "استلام الناقل / مكتب النقل",

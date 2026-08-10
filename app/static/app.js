@@ -38,7 +38,33 @@ function setupInactivityWatch() {
   });
 }
 
+
+function handleSearchEnter(event){
+  if(event.key!=='Enter' || event.isComposing) return;
+  const el=event.target;
+  if(!(el instanceof HTMLInputElement)) return;
+  const id=el.id||'';
+  const actions={
+    searchInput:()=>search(),
+    queueFilter:()=>renderFilteredQueue(),
+    usersFilter:()=>renderFilteredUsers(),
+    vehiclesFilter:()=>renderFilteredVehicles(),
+    productsFilter:()=>renderFilteredProducts(),
+    documentsFilter:()=>renderDocuments(),
+    salesRepsFilter:()=>renderSalesReps(),
+    logsFilter:()=>renderFilteredLogs(),
+    reportDriver:()=>runReport(),
+    reportSalesRep:()=>runReport(),
+    popupFilter:()=>el.dispatchEvent(new Event('input',{bubbles:true})),
+  };
+  const action=actions[id];
+  if(!action) return;
+  event.preventDefault();
+  action();
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('keydown',handleSearchEnter);
   setupInactivityWatch();
   bind('loginForm','submit',login);
   bind('logoutBtn','click',logout);
@@ -208,6 +234,7 @@ async function runReport(){
     const sales_rep=document.getElementById('reportSalesRep').value.trim();
     const qs=new URLSearchParams({date_from:from,date_to:to,driver,sales_rep});
     let data, html='', title='';
+    document.getElementById('reportSummaryCards').innerHTML='';
     if(type==='summary' || type==='aging'){
       data=await api('/api/reports/summary?'+qs);
       title=type==='aging'?'تقرير أعمار الفواتير':'تقرير الفواتير';
@@ -222,7 +249,22 @@ async function runReport(){
       }
     }else if(type==='returns'){
       data=await api('/api/reports/returns?'+qs); title='تقرير المرتجعات';
-      html=`<table><thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>التاريخ</th><th>الأصناف المرتجعة</th><th>المخزن</th><th>مردود المبيعات</th></tr></thead><tbody>${data.map(x=>`<tr><td>${esc(x.invoice_no)}</td><td>${esc(x.customer||'')}</td><td>${esc(x.driver_name||'')}</td><td>${dateOnlyText(x.invoice_date)}</td><td>${(x.return_items||[]).map(i=>`${esc(i.product_name)}: ${esc(i.quantity)} ${esc(i.unit||'')}${i.warehouse_match===false?' (غير مطابق)':''}`).join('<br>')}</td><td>${x.return_received?'تم الاستلام':'معلق'}</td><td>${x.sales_return_reviewed?'تم عمل المردود':(x.sales_return_required?'معلق':'—')}</td></tr>`).join('')}</tbody></table>`;
+      const warehousePending=data.filter(x=>!x.return_received).length;
+      const accountantPending=data.filter(x=>x.return_received && x.sales_return_required && !x.sales_return_reviewed).length;
+      const accountantDone=data.filter(x=>x.sales_return_reviewed).length;
+      document.getElementById('reportSummaryCards').innerHTML=
+        `<div class="card stat">إجمالي فواتير المرتجعات<b>${data.length}</b></div>`+
+        `<div class="card stat">بانتظار المخزن<b>${warehousePending}</b></div>`+
+        `<div class="card stat">بانتظار محاسب المبيعات<b>${accountantPending}</b></div>`+
+        `<div class="card stat">تم عمل المردود<b>${accountantDone}</b></div>`;
+      const warehouseState=x=>x.return_received?'✓ تم استلام المرتجع':'⏳ بانتظار المخزن';
+      const salesState=x=>{
+        if(!x.return_received) return '— لم يصل للمحاسب بعد';
+        if(x.sales_return_reviewed) return '✓ تم عمل المردود';
+        if(x.sales_return_required) return '⏳ بانتظار محاسب المبيعات';
+        return '✓ لا يحتاج مردودًا محاسبيًا';
+      };
+      html=`<table><thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>التاريخ</th><th>الأصناف المرتجعة</th><th>المخزن</th><th>مردود المبيعات</th><th>حالة الفاتورة</th></tr></thead><tbody>${data.map(x=>`<tr><td data-label="الفاتورة">${esc(x.invoice_no)}</td><td data-label="العميل">${esc(x.customer||'')}</td><td data-label="السائق">${esc(x.driver_name||'')}</td><td data-label="التاريخ">${dateOnlyText(x.invoice_date)}</td><td data-label="الأصناف المرتجعة">${(x.return_items||[]).map(i=>`${esc(i.product_name)}: ${esc(i.quantity)} ${esc(i.unit||'')}${i.warehouse_match===false?' (غير مطابق)':''}`).join('<br>')}</td><td data-label="المخزن">${warehouseState(x)}</td><td data-label="مردود المبيعات">${salesState(x)}</td><td data-label="حالة الفاتورة">${statusName(x.status)}</td></tr>`).join('')}</tbody></table>`;
     }else{
       data=await api('/api/reports/drivers?'+qs); title='تقرير أداء السائقين';
       html=`<table><thead><tr><th>السائق</th><th>حمل</th><th>تم التسليم</th><th>إلى مكتب</th><th>مؤجل</th><th>مرتجعات</th></tr></thead><tbody>${data.map(x=>`<tr><td>${esc(x.driver)}</td><td>${x.loaded}</td><td>${x.delivered}</td><td>${x.office}</td><td>${x.postponed}</td><td>${x.returns}</td></tr>`).join('')}</tbody></table>`;
