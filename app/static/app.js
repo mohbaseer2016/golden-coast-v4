@@ -221,8 +221,10 @@ async function showInvoice(invoice) {
   let html = `<div class="card invoice-summary">
     <b>العميل:</b> ${esc(invoice.customer||'')}<br>
     <b>المندوب:</b> ${esc(invoice.sales_rep_name||'لم يحدد')}<br>
+    ${invoice.goods_source==='CUSTOMER_TRANSFER'?`<b>مصدر البضاعة:</b> مرتجع من العميل ${esc(invoice.source_customer||'')} إلى العميل ${esc(invoice.customer||'')}<br>`:''}
     <b>طريقة التوصيل:</b> ${esc(modeNames[invoice.delivery_mode]||'لم تحدد')}<br>
     <b>السائق/المستلم:</b> ${esc(invoice.driver_name || 'لم يحدد')}<br>
+    ${invoice.delivery_mode==='EXTERNAL_DRIVER'?`<b>جوال السائق الخارجي:</b> ${esc(invoice.external_driver_phone||'')}<br>`:''}
     <b>السيارة:</b> ${esc(invoice.vehicle_no || '—')}<br>
     <b>الحالة:</b> ${statusName(invoice.status)}
   </div>`;
@@ -319,7 +321,6 @@ function goodsMovementHtml(rows=[]) {
 
 function warehouseForm() {
   const companyDrivers = state.drivers.filter(d=>!d.is_external_driver).map(d=>`<option value="${attr(d.driver_code)}">${esc(d.name)}</option>`).join('');
-  const externalDrivers = state.drivers.filter(d=>d.is_external_driver).map(d=>`<option value="${attr(d.driver_code)}">${esc(d.name)}</option>`).join('');
   const vehicleOptions = state.vehicles.map(v=>`<option value="${v.id}">${esc(v.name)} — ${esc(v.plate_no)}</option>`).join('');
   return `<form id="warehouseForm">
     <label>طريقة التوصيل / الاستلام</label>
@@ -336,8 +337,10 @@ function warehouseForm() {
     </div>
 
     <div id="externalDriverField" class="hidden">
-      <label>السائق الخارجي</label>
-      <select id="externalDriverSelect"><option value="">اختر</option>${externalDrivers}</select>
+      <label>اسم السائق الخارجي (إجباري)</label>
+      <input id="externalDriverName" name="external_driver_name" autocomplete="off">
+      <label>رقم جوال السائق الخارجي (إجباري)</label>
+      <input id="externalDriverPhone" name="external_driver_phone" type="tel" inputmode="tel" autocomplete="off">
     </div>
 
     <input type="hidden" name="driver_code" id="warehouseDriverCode">
@@ -467,18 +470,23 @@ function returnForm(invoice, allIssues=[]) {
 
 
 function closeForm(invoice) {
+  const receipt = invoice.customer_receipt_photo || invoice.receipt_photo || '';
   return `<form id="closeForm">
-    <div class="card"><b>استلام أصل الفاتورة</b><br>صوّر أصل الفاتورة عند وصوله للموارد ثم أكد الاستلام.</div>
-    <label>استلام أصل الفاتورة</label>
-    <select name="original_received"><option>نعم</option><option>لا</option></select>
-    <label>صورة أصل الفاتورة (إجباري)</label>
-    <input name="original_document_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif" required>
-    <label>ملاحظات</label><textarea name="notes"></textarea>
-    <button class="success">تأكيد استلام أصل الفاتورة</button>
+    <div class="card">
+      <b>متابعة أصل الفاتورة</b><br>
+      الموارد تؤكد فقط هل وصل أصل الفاتورة الورقي أم لا. لا يلزم إعادة رفع صورة استلام العميل.
+      ${receipt ? `<div style="margin-top:8px"><a href="${attr(receipt)}" target="_blank" rel="noopener">فتح صورة الاستلام المرفوعة سابقًا</a></div>` : ''}
+    </div>
+    <label>هل تم استلام أصل الفاتورة؟</label>
+    <select name="original_received" required>
+      <option value="">اختر</option>
+      <option value="نعم">نعم، تم استلام الأصل</option>
+      <option value="لا">لا، لم يصل الأصل بعد</option>
+    </select>
+    <label>ملاحظات (اختياري)</label><textarea name="notes"></textarea>
+    <button class="success">حفظ حالة أصل الفاتورة</button>
   </form>`;
 }
-
-
 
 function customerReceiptForm(invoice) {
   const context = invoice.delivery_mode==='EXTERNAL_DRIVER'
@@ -498,7 +506,12 @@ function customerReceiptForm(invoice) {
       <button type="button" class="secondary" id="addCustomerReceiptIssue">+ إضافة صنف فرق</button>
     </div>
     <input type="hidden" name="issues_json" value="[]">
-    <label>صورة استلام العميل النهائي (إجباري)</label>
+    ${invoice.goods_source==='CUSTOMER_TRANSFER'?`
+    <div class="card"><b>العميل الأول:</b> ${esc(invoice.source_customer||'')}<br>ارفع صورة المرتجع/استلام البضاعة من العميل الأول أولًا.</div>
+    <label>صورة مرتجع / استلام العميل الأول (إجباري)</label>
+    <input name="source_return_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif" required>
+    `:''}
+    <label>صورة استلام العميل الثاني النهائي (إجباري)</label>
     <input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif" required>
     <label>ملاحظات</label><textarea name="notes"></textarea>
     <button class="success">اعتماد استلام العميل</button>
@@ -779,7 +792,17 @@ function showNewInvoice() {
   document.getElementById('modalTitle').textContent = 'إدخال فاتورة';
   document.getElementById('modalContent').innerHTML = `<form id="invoiceForm">
     <label>رقم الفاتورة</label><input name="invoice_no" required>
-    <label>اسم العميل (اختياري)</label><input name="customer">
+    <label>اسم العميل الثاني / المستلم (اختياري)</label><input name="customer">
+    <label>مصدر البضاعة</label>
+    <select id="goodsSource" name="goods_source">
+      <option value="WAREHOUSE">من المخزن</option>
+      <option value="CUSTOMER_TRANSFER">مرتجع من عميل إلى عميل آخر</option>
+    </select>
+    <div id="sourceCustomerField" class="hidden">
+      <label>اسم العميل الأول الذي ستؤخذ منه البضاعة (إجباري)</label>
+      <input name="source_customer">
+      <small>هذا المسار لا يدخل المخزن ولا السائق؛ ينتقل من محاسب المبيعات مباشرة إلى المندوب.</small>
+    </div>
     <label>المندوب (اختياري ويمكن إضافته لاحقًا)</label>
     <select name="sales_rep_id"><option value="">بدون مندوب الآن</option>${state.salesReps.filter(r=>r.active).map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select>
     <label>تاريخ الفاتورة</label><input name="invoice_date" type="date" required value="${new Date().toISOString().slice(0,10)}">
@@ -788,6 +811,16 @@ function showNewInvoice() {
   </form>`;
   openModal();
   bindModalForms();
+  const form=document.getElementById('invoiceForm');
+  const source=form.querySelector('#goodsSource'), sourceBox=form.querySelector('#sourceCustomerField');
+  const sourceInput=form.querySelector('[name="source_customer"]'), rep=form.querySelector('[name="sales_rep_id"]');
+  const syncSource=()=>{
+    const transfer=source.value==='CUSTOMER_TRANSFER';
+    sourceBox.classList.toggle('hidden',!transfer);
+    sourceInput.required=transfer;
+    rep.required=transfer;
+  };
+  source.addEventListener('change',syncSource); syncSource();
 }
 
 async function search() {
@@ -1186,7 +1219,8 @@ function setupWarehouseForm(form){
   const companyField=form.querySelector('#companyDriverField');
   const externalField=form.querySelector('#externalDriverField');
   const companySelect=form.querySelector('#companyDriverSelect');
-  const externalSelect=form.querySelector('#externalDriverSelect');
+  const externalName=form.querySelector('#externalDriverName');
+  const externalPhone=form.querySelector('#externalDriverPhone');
   const driverCode=form.querySelector('#warehouseDriverCode');
   const vehicleField=form.querySelector('#vehicleField');
   const vehicleSelect=form.querySelector('[name="vehicle_id"]');
@@ -1216,7 +1250,8 @@ function setupWarehouseForm(form){
     receiptInput.required=needsReceipt;
 
     companySelect.required=!fullReturn && v==='COMPANY_DRIVER';
-    externalSelect.required=!fullReturn && v==='EXTERNAL_DRIVER';
+    externalName.required=!fullReturn && v==='EXTERNAL_DRIVER';
+    externalPhone.required=!fullReturn && v==='EXTERNAL_DRIVER';
     vehicleSelect.required=!fullReturn && v==='COMPANY_DRIVER';
 
     if(v==='EXTERNAL_DRIVER'){
@@ -1227,7 +1262,7 @@ function setupWarehouseForm(form){
       receiptHelp.textContent='يعتبر هذا استلام العميل النهائي.';
     }
 
-    driverCode.value=v==='COMPANY_DRIVER'?companySelect.value:(v==='EXTERNAL_DRIVER'?externalSelect.value:'');
+    driverCode.value=v==='COMPANY_DRIVER'?companySelect.value:'';
     if(v!=='COMPANY_DRIVER') vehicleSelect.value='';
 
     const needsRep=!fullReturn && ['EXTERNAL_DRIVER','SALES_REP_SELF'].includes(v);
@@ -1239,7 +1274,7 @@ function setupWarehouseForm(form){
     }
   };
 
-  [mode,companySelect,externalSelect].forEach(el=>el.addEventListener('change',syncMode));
+  [mode,companySelect].forEach(el=>el.addEventListener('change',syncMode));
   const syncLoad=()=>{
     const fullReturn=loadStatus.value==='مرتجع كامل من المخزن';
     issuesBox.classList.toggle('hidden',loadStatus.value!=='تم التحميل ناقص');

@@ -105,6 +105,12 @@ def ensure_columns():
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS carrier_receipt_photo VARCHAR(255)",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS delivery_target VARCHAR(30)",
                 "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS transport_office_name VARCHAR(180)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS external_driver_phone VARCHAR(40)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS goods_source VARCHAR(30)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS source_customer VARCHAR(180)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS source_return_photo VARCHAR(255)",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS source_return_received_at TIMESTAMP",
+                "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS source_return_received_by VARCHAR(80)",
                 "ALTER TABLE invoice_issue_items ADD COLUMN IF NOT EXISTS warehouse_match BOOLEAN",
                 "ALTER TABLE invoice_issue_items ADD COLUMN IF NOT EXISTS actual_quantity VARCHAR(80)",
                 "ALTER TABLE invoice_issue_items ADD COLUMN IF NOT EXISTS warehouse_note TEXT",
@@ -142,6 +148,12 @@ def ensure_columns():
             if "carrier_receipt_photo" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN carrier_receipt_photo VARCHAR(255)")
             if "delivery_target" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN delivery_target VARCHAR(30)")
             if "transport_office_name" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN transport_office_name VARCHAR(180)")
+            if "external_driver_phone" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN external_driver_phone VARCHAR(40)")
+            if "goods_source" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN goods_source VARCHAR(30)")
+            if "source_customer" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN source_customer VARCHAR(180)")
+            if "source_return_photo" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN source_return_photo VARCHAR(255)")
+            if "source_return_received_at" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN source_return_received_at DATETIME")
+            if "source_return_received_by" not in cols_i: stmts.append("ALTER TABLE invoices ADD COLUMN source_return_received_by VARCHAR(80)")
             if "warehouse_match" not in cols_ii: stmts.append("ALTER TABLE invoice_issue_items ADD COLUMN warehouse_match BOOLEAN")
             if "actual_quantity" not in cols_ii: stmts.append("ALTER TABLE invoice_issue_items ADD COLUMN actual_quantity VARCHAR(80)")
             if "warehouse_note" not in cols_ii: stmts.append("ALTER TABLE invoice_issue_items ADD COLUMN warehouse_note TEXT")
@@ -364,6 +376,11 @@ def goods_movement_timeline(db: Session, invoice: Invoice) -> list[dict]:
     add("CREATE", "إدخال الفاتورة", invoice.created_at, invoice.created_by,
         f"العميل: {invoice.customer or '-'}" + (f" — المندوب: {invoice.sales_rep_name}" if invoice.sales_rep_name else ""))
 
+    if invoice.goods_source == "CUSTOMER_TRANSFER":
+        add("CUSTOMER_TRANSFER_SOURCE", "استلام المرتجع من العميل الأول",
+            invoice.source_return_received_at, invoice.source_return_received_by,
+            f"العميل الأول: {invoice.source_customer or '-'}", invoice.source_return_photo)
+
     warehouse_title = "مرتجع كامل من المخزن" if invoice.load_status == "مرتجع كامل من المخزن" else "تحميل المخزن"
     add("WAREHOUSE", warehouse_title, invoice.loaded_at, invoice.warehouse_user or invoice.updated_by,
         (invoice.warehouse_shortage_reason or invoice.load_status or "") if invoice.load_status == "مرتجع كامل من المخزن" else (invoice.load_status or ""), invoice.warehouse_photo)
@@ -466,6 +483,12 @@ def invoice_dict(invoice: Invoice):
         "carrier_receipt_photo": invoice.carrier_receipt_photo,
         "delivery_target": invoice.delivery_target,
         "transport_office_name": invoice.transport_office_name,
+        "external_driver_phone": invoice.external_driver_phone,
+        "goods_source": invoice.goods_source,
+        "source_customer": invoice.source_customer,
+        "source_return_photo": invoice.source_return_photo,
+        "source_return_received_at": invoice.source_return_received_at.isoformat() if invoice.source_return_received_at else None,
+        "source_return_received_by": invoice.source_return_received_by,
         "status": invoice.status,
         "load_status": invoice.load_status,
         "warehouse_shortage_reason": invoice.warehouse_shortage_reason,
@@ -710,6 +733,8 @@ def create_invoice(
     invoice_date: str = Form(""),
     notes: str = Form(""),
     sales_rep_id: str = Form(""),
+    goods_source: str = Form("WAREHOUSE"),
+    source_customer: str = Form(""),
     db: Session = Depends(get_db),
 ):
     user = require_permission(request, db, "invoice_create")
@@ -724,6 +749,15 @@ def create_invoice(
             rep = None
         if not rep or not rep.active:
             raise HTTPException(status_code=400, detail="المندوب المحدد غير صحيح أو موقوف.")
+    if goods_source not in ["WAREHOUSE", "CUSTOMER_TRANSFER"]:
+        raise HTTPException(status_code=400, detail="مصدر البضاعة غير صحيح.")
+    if goods_source == "CUSTOMER_TRANSFER":
+        if not rep:
+            raise HTTPException(status_code=400, detail="حدد المندوب لأن تحويل عميل إلى عميل ينتقل مباشرة للمندوب.")
+        if not source_customer.strip():
+            raise HTTPException(status_code=400, detail="اكتب اسم العميل الأول الذي ستؤخذ منه البضاعة.")
+
+    direct_transfer = goods_source == "CUSTOMER_TRANSFER"
     db.add(Invoice(
         invoice_no=invoice_no,
         customer=customer.strip() or None,
@@ -731,10 +765,15 @@ def create_invoice(
         sales_rep_name=rep.name if rep else None,
         invoice_date=datetime.fromisoformat(invoice_date) if invoice_date else datetime.utcnow(),
         hr_notes=notes.strip() or None,
+        goods_source=goods_source,
+        source_customer=source_customer.strip() or None,
+        delivery_mode="CUSTOMER_TRANSFER" if direct_transfer else None,
+        customer_receipt_required=direct_transfer,
+        delivery_result="تحويل مباشر من عميل إلى عميل — بانتظار المندوب" if direct_transfer else None,
         created_by=user["username"],
         updated_by=user["username"],
-        status="WAREHOUSE_PENDING",
-        current_owner="WAREHOUSE",
+        status="CUSTOMER_RECEIPT_PENDING" if direct_transfer else "WAREHOUSE_PENDING",
+        current_owner="SALES_REP" if direct_transfer else "WAREHOUSE",
     ))
     db.commit()
     audit(db, "CREATE_INVOICE", user["username"], invoice_no)
@@ -781,6 +820,8 @@ def warehouse_update(
     request: Request,
     delivery_mode: str = Form("COMPANY_DRIVER"),
     driver_code: str = Form(""),
+    external_driver_name: str = Form(""),
+    external_driver_phone: str = Form(""),
     vehicle_id: str = Form(""),
     load_status: str = Form(...),
     shortage_reason: str = Form(""),
@@ -810,7 +851,13 @@ def warehouse_update(
 
     driver = None
     vehicle = None
-    if not full_warehouse_return and delivery_mode in ["COMPANY_DRIVER", "EXTERNAL_DRIVER"]:
+    if not full_warehouse_return and delivery_mode == "EXTERNAL_DRIVER":
+        if not external_driver_name.strip():
+            raise HTTPException(status_code=400, detail="اسم السائق الخارجي إجباري.")
+        if not external_driver_phone.strip():
+            raise HTTPException(status_code=400, detail="رقم جوال السائق الخارجي إجباري.")
+
+    if not full_warehouse_return and delivery_mode == "COMPANY_DRIVER":
         if not driver_code:
             raise HTTPException(status_code=400, detail="اختر السائق.")
         driver = db.scalar(select(User).where(
@@ -1164,6 +1211,7 @@ def customer_receipt_update(
     notes: str = Form(""),
     issues_json: str = Form("[]"),
     receipt_photo: UploadFile | None = File(None),
+    source_return_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     user = require_permission(request, db, "customer_receipt_upload")
@@ -1183,6 +1231,13 @@ def customer_receipt_update(
     receipt = save_upload(receipt_photo, invoice_no, "customer_final_receipt")
     if not receipt:
         raise HTTPException(status_code=400, detail="صورة استلام العميل النهائي إجبارية.")
+    if invoice.goods_source == "CUSTOMER_TRANSFER":
+        source_photo = save_upload(source_return_photo, invoice_no, "source_customer_return")
+        if not source_photo:
+            raise HTTPException(status_code=400, detail="صورة استلام/مرتجع العميل الأول إجبارية.")
+        invoice.source_return_photo = source_photo
+        invoice.source_return_received_at = datetime.utcnow()
+        invoice.source_return_received_by = user["username"]
 
     try:
         issue_rows = json.loads(issues_json or "[]")
@@ -1314,27 +1369,30 @@ def close_invoice(
     request: Request,
     original_received: str = Form(...),
     notes: str = Form(""),
-    original_document_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     user = require_permission(request, db, "close_invoice")
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or not invoice.loaded_at or invoice.status == "CLOSED":
-        raise HTTPException(status_code=400, detail="الفاتورة ليست جاهزة لاستلام أصلها.")
-    if original_received != "نعم":
-        raise HTTPException(status_code=400, detail="أصل الفاتورة لم يُستلم.")
+        raise HTTPException(status_code=400, detail="الفاتورة ليست جاهزة لمتابعة أصلها.")
 
+    if original_received not in ["نعم", "لا"]:
+        raise HTTPException(status_code=400, detail="حدد هل تم استلام أصل الفاتورة أم لا.")
 
-    original_image = save_upload(original_document_photo, invoice_no, "original_document")
-    if not original_image:
-        raise HTTPException(status_code=400, detail="صورة أصل الفاتورة إجبارية عند استلام الأصل.")
-
-    invoice.original_document_received = True
-    invoice.original_document_photo = original_image
-    invoice.original_document_received_at = datetime.utcnow()
-    invoice.original_document_received_by = user["username"]
     invoice.closure_notes = notes.strip() or None
     invoice.updated_by = user["username"]
+
+    if original_received == "لا":
+        # لا نطلب من الموارد إعادة رفع صورة استلام العميل ولا صورة أخرى.
+        # تبقى الفاتورة معلقة حتى يصل أصلها الورقي.
+        invoice.original_document_received = False
+        db.commit()
+        audit(db, "ORIGINAL_DOCUMENT_NOT_RECEIVED", user["username"], invoice_no)
+        return {"ok": True, "closed": False, "original_received": False}
+
+    invoice.original_document_received = True
+    invoice.original_document_received_at = datetime.utcnow()
+    invoice.original_document_received_by = user["username"]
 
     pending_rep_shortage = False
     if invoice.delivery_mode == "SALES_REP_SELF":
@@ -1350,12 +1408,10 @@ def close_invoice(
         closed = False
     else:
         closed = maybe_close_invoice(invoice)
+
     db.commit()
     audit(db, "ORIGINAL_DOCUMENT_RECEIVED", user["username"], invoice_no, {"closed": closed})
-    return {"ok": True, "closed": closed}
-
-
-
+    return {"ok": True, "closed": closed, "original_received": True}
 
 @app.get("/api/settings/invoice-sequence")
 def get_invoice_sequence(request: Request, db: Session = Depends(get_db)):
