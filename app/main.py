@@ -377,7 +377,7 @@ def goods_movement_timeline(db: Session, invoice: Invoice) -> list[dict]:
         f"العميل: {invoice.customer or '-'}" + (f" — المندوب: {invoice.sales_rep_name}" if invoice.sales_rep_name else ""))
 
     if invoice.goods_source == "CUSTOMER_TRANSFER":
-        add("CUSTOMER_TRANSFER_SOURCE", "استلام المرتجع من العميل الأول",
+        add("CUSTOMER_TRANSFER_SOURCE", "سحب البضاعة من العميل الأول",
             invoice.source_return_received_at, invoice.source_return_received_by,
             f"العميل الأول: {invoice.source_customer or '-'}", invoice.source_return_photo)
 
@@ -1237,7 +1237,7 @@ def customer_receipt_update(
     if invoice.goods_source == "CUSTOMER_TRANSFER":
         source_photo = save_upload(source_return_photo, invoice_no, "source_customer_return")
         if not source_photo:
-            raise HTTPException(status_code=400, detail="صورة استلام/مرتجع العميل الأول إجبارية.")
+            raise HTTPException(status_code=400, detail="صورة السحب من العميل الأول إجبارية.")
         invoice.source_return_photo = source_photo
         invoice.source_return_received_at = datetime.utcnow()
         invoice.source_return_received_by = user["username"]

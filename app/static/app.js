@@ -507,11 +507,11 @@ function customerReceiptForm(invoice) {
     </div>
     <input type="hidden" name="issues_json" value="[]">
     ${invoice.goods_source==='CUSTOMER_TRANSFER'?`
-    <div class="card"><b>العميل الأول:</b> ${esc(invoice.source_customer||'')}<br>ارفع صورة المرتجع/استلام البضاعة من العميل الأول أولًا.</div>
-    <label>صورة مرتجع / استلام العميل الأول (إجباري)</label>
+    <div class="card"><b>العميل الأول:</b> ${esc(invoice.source_customer||'')}<br>ارفع صورة السحب من العميل الأول أولًا.</div>
+    <label>صورة السحب من العميل الأول (إجباري)</label>
     <input name="source_return_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif" required>
     `:''}
-    <label>صورة استلام العميل الثاني النهائي (إجباري)</label>
+    <label>صورة استلام العميل الثاني (إجباري)</label>
     <input name="receipt_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif" required>
     <label>ملاحظات</label><textarea name="notes"></textarea>
     <button class="success">اعتماد استلام العميل</button>
