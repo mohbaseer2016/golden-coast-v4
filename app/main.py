@@ -525,7 +525,14 @@ def invoice_dict(invoice: Invoice):
         "return_difference": invoice.return_difference,
         "return_condition": invoice.return_condition,
         "return_photo": invoice.return_photo,
+        "sales_return_required": invoice.sales_return_required,
+        "sales_return_reviewed": invoice.sales_return_reviewed,
+        "sales_return_reviewed_by": invoice.sales_return_reviewed_by,
+        "sales_return_reviewed_at": invoice.sales_return_reviewed_at.isoformat() if invoice.sales_return_reviewed_at else None,
+        "sales_return_notes": invoice.sales_return_notes,
         "original_document_received": invoice.original_document_received,
+        "original_document_received_by": invoice.original_document_received_by,
+        "original_document_received_at": invoice.original_document_received_at.isoformat() if invoice.original_document_received_at else None,
         "closure_notes": invoice.closure_notes,
         "hr_notes": invoice.hr_notes,
         "warehouse_notes": invoice.warehouse_notes,
@@ -1372,6 +1379,8 @@ def sales_return_review(
     invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
     if not invoice or not invoice.sales_return_required:
         raise HTTPException(status_code=400, detail="لا يوجد مردود يحتاج اعتماد محاسب المبيعات.")
+    if not invoice.return_received:
+        raise HTTPException(status_code=400, detail="لا يمكن اعتماد المردود قبل استلام ومطابقة المرتجع في المخزن.")
     if invoice.sales_return_reviewed:
         raise HTTPException(status_code=400, detail="تم اعتماد المردود مسبقًا.")
 

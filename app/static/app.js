@@ -546,7 +546,7 @@ function salesReturnReviewForm(invoice, allIssues=[]) {
     ${details}
     <label>ملاحظات محاسب المبيعات</label>
     <textarea name="notes"></textarea>
-    <button class="success">اعتماد المردود</button>
+    <button class="success">تم عمل المردود — اعتماد محاسبي</button>
   </form>`;
 }
 
@@ -556,7 +556,7 @@ function finalReviewSummary(invoice) {
   const customer = !invoice.customer_receipt_required ? '✓ لا توجد متابعة استلام إضافية'
     : (invoice.customer_receipt_received ? '✓ تم استلام صورة العميل النهائية' : '⏳ بانتظار استلام العميل النهائي');
   const sales = !invoice.sales_return_required ? '✓ لا يوجد مردود يحتاج محاسب المبيعات'
-    : (invoice.sales_return_reviewed ? '✓ تم اعتماد المردود' : '⏳ بانتظار محاسب المبيعات');
+    : (invoice.sales_return_reviewed ? '✓ تم عمل المردود بواسطة محاسب المبيعات' : '⏳ المردود بانتظار محاسب المبيعات');
   const discrepancy = !invoice.delivery_discrepancy_required ? '✓ لا يوجد فرق تسليم'
     : (invoice.delivery_discrepancy_reviewed ? '✓ تمت مراجعة فرق التسليم' : '⚠️ فرق التسليم بانتظار الموارد');
   return `<div class="card final-review-summary">
