@@ -5,8 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#17365d">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v={{ app_version }}">
   <title>شركة جولدن كوست التجارية</title>
+  <script>window.APP_VERSION = "{{ app_version }}";</script>
 </head>
 <body>
   <div id="loginView" class="page">
@@ -244,6 +245,6 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v={{ app_version }}"></script>
 </body>
 </html>

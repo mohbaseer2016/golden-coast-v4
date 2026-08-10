@@ -45,6 +45,44 @@ class SupabaseStorage:
         image.save(output, format="JPEG", quality=68, optimize=False)
         return output.getvalue()
 
+
+    def _public_url(self, object_path: str) -> str:
+        encoded_path = quote(object_path, safe="/")
+        return f"{self.supabase_url}/storage/v1/object/public/{self.bucket}/{encoded_path}"
+
+    def find_existing_image(self, invoice_no: str, kinds: list[str], at: datetime | None = None) -> str | None:
+        """Find an already-stored invoice image without creating/copying any object."""
+        if not at:
+            return None
+        safe_invoice = "".join(c for c in str(invoice_no) if c.isalnum() or c in ("-", "_")) or "invoice"
+        prefix = f"{at.year}/{at.month:02d}/{safe_invoice}"
+        headers = {
+            "apikey": self.service_role_key,
+            "Authorization": f"Bearer {self.service_role_key}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self.supabase_url}/storage/v1/object/list/{self.bucket}"
+        body = {
+            "prefix": prefix,
+            "limit": 200,
+            "offset": 0,
+            "sortBy": {"column": "created_at", "order": "desc"},
+        }
+        try:
+            response = httpx.post(url, json=body, headers=headers, timeout=8.0)
+            if response.status_code != 200:
+                return None
+            rows = response.json()
+        except (httpx.RequestError, ValueError):
+            return None
+
+        normalized = tuple(f"{kind}_" for kind in kinds)
+        for row in rows if isinstance(rows, list) else []:
+            name = str(row.get("name") or "")
+            if name.startswith(normalized):
+                return self._public_url(f"{prefix}/{name}")
+        return None
+
     def upload_image(self, invoice_no: str, kind: str, raw: bytes) -> str:
         now = datetime.now()
         safe_invoice = "".join(c for c in invoice_no if c.isalnum() or c in ("-", "_")) or "invoice"

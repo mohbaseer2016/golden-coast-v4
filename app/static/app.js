@@ -302,11 +302,15 @@ async function showInvoice(invoice) {
   html += goodsMovementHtml(movements);
 
   const photos=[
-    ['استلام العميل', invoice.customer_receipt_photo],
-    ['استلام الناقل / مكتب النقل', invoice.carrier_receipt_photo],
     ['أصل الفاتورة', invoice.original_document_photo],
-    ['صورة المرتجع', invoice.return_photo],
-  ].filter(x=>x[1]);
+    ['استلام العميل النهائي', invoice.customer_receipt_photo],
+    ['استلام العميل / التسليم', invoice.receipt_photo],
+    ['استلام الناقل / مكتب النقل', invoice.carrier_receipt_photo],
+    ['السحب من العميل الأول', invoice.source_return_photo],
+    ['مرتجع المخزن', invoice.return_photo],
+    ['مرتجع السائق', invoice.driver_return_photo],
+    ['مستند المخزن', invoice.warehouse_photo],
+  ].filter((x,idx,arr)=>x[1] && arr.findIndex(y=>y[1]===x[1])===idx);
   if(photos.length){
     html += `<div class="document-preview-grid">${photos.map(([label,url])=>`
       <a class="document-preview-card" href="${attr(url)}" target="_blank" rel="noopener">
@@ -541,22 +545,30 @@ function returnForm(invoice, allIssues=[]) {
 
 function closeForm(invoice) {
   const receipt = invoice.customer_receipt_photo || invoice.receipt_photo || '';
-  return `<form id="closeForm">
+  const existingOriginal = invoice.original_document_photo || '';
+  return `<form id="closeForm" data-has-original-photo="${existingOriginal?'1':'0'}">
     <div class="card">
       <b>متابعة أصل الفاتورة</b><br>
-      الموارد تؤكد فقط هل وصل أصل الفاتورة الورقي أم لا. لا يلزم إعادة رفع صورة استلام العميل.
-      ${receipt ? `<div style="margin-top:8px"><a href="${attr(receipt)}" target="_blank" rel="noopener">فتح صورة الاستلام المرفوعة سابقًا</a></div>` : ''}
+      الموارد تؤكد وصول أصل الفاتورة الورقي، وتصور الأصل عند استلامه.
+      ${receipt ? `<div style="margin-top:8px"><a href="${attr(receipt)}" target="_blank" rel="noopener">فتح صورة استلام العميل المرفوعة سابقًا</a></div>` : ''}
+      ${existingOriginal ? `<div style="margin-top:8px"><a href="${attr(existingOriginal)}" target="_blank" rel="noopener">فتح صورة أصل الفاتورة الموجودة</a></div>` : ''}
     </div>
     <label>هل تم استلام أصل الفاتورة؟</label>
-    <select name="original_received" required>
+    <select id="originalReceivedSelect" name="original_received" required>
       <option value="">اختر</option>
       <option value="نعم">نعم، تم استلام الأصل</option>
       <option value="لا">لا، لم يصل الأصل بعد</option>
     </select>
+    <div id="originalDocumentPhotoField" class="hidden">
+      <label>صورة أصل الفاتورة ${existingOriginal?'(اختياري — توجد صورة محفوظة)':'(إجباري)'}</label>
+      <input name="original_document_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif">
+      <small>يتم ضغط الصورة قبل الرفع لتوفير المساحة والوقت.</small>
+    </div>
     <label>ملاحظات (اختياري)</label><textarea name="notes"></textarea>
     <button class="success">حفظ حالة أصل الفاتورة</button>
   </form>`;
 }
+
 
 function customerReceiptForm(invoice) {
   const context = invoice.delivery_mode==='EXTERNAL_DRIVER'
@@ -688,6 +700,20 @@ function bindModalForms() {
       result.addEventListener('change',syncDriverForm);
       target.addEventListener('change',syncDriverForm);
       syncDriverForm();
+    }
+
+    if (id === 'closeForm') {
+      const received=form.querySelector('#originalReceivedSelect');
+      const photoBox=form.querySelector('#originalDocumentPhotoField');
+      const photoInput=form.querySelector('[name="original_document_photo"]');
+      const hasExisting=form.dataset.hasOriginalPhoto==='1';
+      const syncOriginal=()=>{
+        const yes=received.value==='نعم';
+        photoBox.classList.toggle('hidden',!yes);
+        photoInput.required=yes && !hasExisting;
+      };
+      received.addEventListener('change',syncOriginal);
+      syncOriginal();
     }
 
     if (id === 'customerReceiptForm') {
@@ -1745,3 +1771,42 @@ async function saveInvoiceSequenceStart(){
     toast('تم حفظ بداية تسلسل الفواتير.');
   }catch(e){toast(e.message,true);}
 }
+
+
+// Deployment freshness: detects a new Render commit without forcing users to close the app.
+let updateCheckBusy = false;
+let updateNoticeShown = false;
+async function checkForAppUpdate() {
+  if (updateCheckBusy) return;
+  updateCheckBusy = true;
+  try {
+    const res = await fetch('/api/version?t=' + Date.now(), {cache:'no-store', credentials:'same-origin'});
+    if (!res.ok) return;
+    const data = await res.json();
+    const current = String(window.APP_VERSION || 'dev');
+    const latest = String(data.version || 'dev');
+    if (current !== 'dev' && latest !== 'dev' && latest !== current && !updateNoticeShown) {
+      updateNoticeShown = true;
+      const activeForm = document.querySelector('#modal:not(.hidden) form');
+      const message = activeForm
+        ? 'يوجد تحديث جديد للنظام. احفظ أو أغلق العملية الحالية ثم اضغط تحديث.'
+        : 'يوجد تحديث جديد للنظام جاهز الآن.';
+      const box = document.createElement('div');
+      box.id = 'appUpdateNotice';
+      box.style.cssText = 'position:fixed;z-index:99999;left:12px;right:12px;bottom:12px;max-width:560px;margin:auto;background:#fff;border:1px solid #bbb;border-radius:12px;padding:12px;box-shadow:0 4px 24px #0003;text-align:center';
+      box.innerHTML = `<div style="margin-bottom:8px">${escapeHtml(message)}</div><button type="button" id="applyAppUpdateBtn">تحديث الآن</button>`;
+      document.body.appendChild(box);
+      document.getElementById('applyAppUpdateBtn').onclick = () => location.reload();
+    }
+  } catch (_) {
+    // Network interruption must never block normal work.
+  } finally {
+    updateCheckBusy = false;
+  }
+}
+window.addEventListener('focus', checkForAppUpdate);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') checkForAppUpdate();
+});
+setInterval(checkForAppUpdate, 60000);
+setTimeout(checkForAppUpdate, 5000);

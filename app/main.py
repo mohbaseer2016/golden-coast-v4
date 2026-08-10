@@ -167,6 +167,14 @@ def ensure_columns():
             conn.execute(text(stmt))
 
 
+def app_version() -> str:
+    return (
+        os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("APP_VERSION")
+        or "dev"
+    )[:12]
+
+
 app = FastAPI(title="منصة جولدن كوست لإدارة العمليات")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
@@ -186,9 +194,14 @@ def audit(db: Session, action: str, username: str, invoice_no: str | None = None
 def save_upload(file: UploadFile | None, invoice_no: str, kind: str) -> str | None:
     if not file or not file.filename:
         return None
-    if not (file.content_type or "").startswith("image/"):
+    content_type = (file.content_type or "").lower()
+    suffix = Path(file.filename or "").suffix.lower()
+    allowed_image_suffixes = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif"}
+    if not content_type.startswith("image/") and suffix not in allowed_image_suffixes:
         raise HTTPException(status_code=400, detail="المسموح صور فقط.")
     raw = file.file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="الصورة المرفوعة فارغة.")
     if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY"):
         try:
             return SupabaseStorage().upload_image(invoice_no, kind, raw)
@@ -202,6 +215,42 @@ def save_upload(file: UploadFile | None, invoice_no: str, kind: str) -> str | No
     target = folder / f"{kind}_{uuid.uuid4().hex[:10]}{suffix}"
     target.write_bytes(raw)
     return "/" + str(target.relative_to(ROOT_DIR)).replace("\\", "/")
+
+
+def recover_existing_photo_links(invoice: Invoice) -> bool:
+    """Repair missing DB links from existing Supabase objects; never uploads a new file."""
+    if not (os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")):
+        return False
+    changed = False
+    storage = SupabaseStorage()
+
+    lookups = [
+        ("original_document_photo", ["original_document"], invoice.original_document_received_at),
+        ("customer_receipt_photo", ["customer_final_receipt"], invoice.customer_receipt_received_at),
+        ("source_return_photo", ["source_customer_return"], invoice.source_return_received_at),
+        ("return_photo", ["return_warehouse", "warehouse"], invoice.return_received_at),
+        ("driver_return_photo", ["return_driver", "return_driver_edit"], invoice.delivered_at),
+        ("receipt_photo", ["delivery_receipt", "receipt_edit"], invoice.delivered_at),
+        ("warehouse_photo", ["warehouse"], invoice.loaded_at),
+    ]
+    for field, kinds, at in lookups:
+        if getattr(invoice, field, None) or not at:
+            continue
+        found = storage.find_existing_image(invoice.invoice_no, kinds, at)
+        if found:
+            setattr(invoice, field, found)
+            changed = True
+
+    # Carrier receipt may originate at warehouse handoff (external driver) or driver delivery to office.
+    if not invoice.carrier_receipt_photo:
+        at = invoice.loaded_at if invoice.delivery_mode == "EXTERNAL_DRIVER" else invoice.delivered_at
+        kinds = ["warehouse_handoff"] if invoice.delivery_mode == "EXTERNAL_DRIVER" else ["delivery_receipt", "receipt_edit"]
+        if at:
+            found = storage.find_existing_image(invoice.invoice_no, kinds, at)
+            if found:
+                invoice.carrier_receipt_photo = found
+                changed = True
+    return changed
 
 
 def upsert_user(db: Session, username: str, password: str, name: str, role: str,
@@ -219,6 +268,22 @@ def upsert_user(db: Session, username: str, password: str, name: str, role: str,
             is_external_driver=external,
         )
         db.add(user)
+
+@app.middleware("http")
+async def deployment_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path == "/manifest.webmanifest" or path == "/api/version":
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
+@app.get("/api/version")
+def current_app_version():
+    return {"version": app_version()}
+
 
 @app.on_event("startup")
 def startup():
@@ -240,7 +305,7 @@ def health():
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request, "app_version": app_version()})
 
 @app.get("/manifest.webmanifest")
 def manifest():
@@ -530,6 +595,7 @@ def invoice_dict(invoice: Invoice):
         "status": invoice.status,
         "load_status": invoice.load_status,
         "warehouse_shortage_reason": invoice.warehouse_shortage_reason,
+        "warehouse_photo": invoice.warehouse_photo,
         "delivery_result": invoice.delivery_result,
         "delivery_reason": invoice.delivery_reason,
         "receipt_photo": invoice.receipt_photo,
@@ -981,6 +1047,8 @@ def get_invoice(invoice_no: str, request: Request, db: Session = Depends(get_db)
         raise HTTPException(status_code=403, detail="ليس لديك صلاحية.")
     if user["role"] == "SALES_REP" and invoice.sales_rep_id != user.get("sales_rep_id"):
         raise HTTPException(status_code=403, detail="الفاتورة ليست مسندة لمندوبك.")
+    if recover_existing_photo_links(invoice):
+        db.commit()
     return invoice_dict(invoice)
 
 
@@ -1548,6 +1616,7 @@ def close_invoice(
     request: Request,
     original_received: str = Form(...),
     notes: str = Form(""),
+    original_document_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     user = require_permission(request, db, "close_invoice")
@@ -1568,6 +1637,16 @@ def close_invoice(
         db.commit()
         audit(db, "ORIGINAL_DOCUMENT_NOT_RECEIVED", user["username"], invoice_no)
         return {"ok": True, "closed": False, "original_received": False}
+
+    # Restore the original-invoice photo workflow. Upload only when a new file was selected.
+    # If an old image is already linked/recovered, do not create a duplicate Storage object.
+    if not invoice.original_document_photo:
+        recover_existing_photo_links(invoice)
+    original_image = save_upload(original_document_photo, invoice_no, "original_document")
+    if original_image:
+        invoice.original_document_photo = original_image
+    if not invoice.original_document_photo:
+        raise HTTPException(status_code=400, detail="صورة أصل الفاتورة إجبارية عند تأكيد استلام الأصل.")
 
     invoice.original_document_received = True
     invoice.original_document_received_at = datetime.utcnow()
@@ -1649,7 +1728,16 @@ def documents_archive(
 
     rows = db.scalars(stmt.order_by(Invoice.created_at.desc()).limit(500)).all()
     data = []
+    recovered_any = False
     for inv in rows:
+        needs_recovery = (
+            (category == "originals" and inv.original_document_received and not inv.original_document_photo) or
+            (category == "returns" and (inv.return_received or inv.sales_return_reviewed) and not (inv.return_photo or inv.driver_return_photo)) or
+            (category == "customer_receipts" and inv.customer_receipt_received and not (inv.customer_receipt_photo or inv.receipt_photo)) or
+            (category == "carrier_receipts" and not inv.carrier_receipt_photo)
+        )
+        if needs_recovery and recover_existing_photo_links(inv):
+            recovered_any = True
         if category == "originals":
             if not inv.original_document_received:
                 continue
@@ -1687,6 +1775,8 @@ def documents_archive(
                 "by": inv.driver_name or inv.warehouse_user, "photo": inv.carrier_receipt_photo,
                 "label": "استلام الناقل / مكتب النقل",
             })
+    if recovered_any:
+        db.commit()
     return data
 
 
