@@ -321,16 +321,35 @@ def invoice_sequence_status(db: Session) -> dict:
 def maybe_close_invoice(invoice: Invoice):
     """Close only when every independent required track is complete."""
     ready_document = invoice.goods_source == "CUSTOMER_TRANSFER" or bool(invoice.original_document_received)
+
+    # Never close while a physical return is still waiting for warehouse confirmation.
+    ready_physical_return = not (
+        invoice.status == "RETURN_PENDING" and not bool(invoice.return_received)
+    )
+
     ready_return = (not invoice.sales_return_required) or bool(invoice.sales_return_reviewed)
     ready_customer = (not invoice.customer_receipt_required) or bool(invoice.customer_receipt_received)
     ready_discrepancy = (not invoice.delivery_discrepancy_required) or bool(invoice.delivery_discrepancy_reviewed)
-    if ready_document and ready_return and ready_customer and ready_discrepancy:
+
+    if ready_document and ready_physical_return and ready_return and ready_customer and ready_discrepancy:
         invoice.status = "CLOSED"
         invoice.current_owner = "ARCHIVE"
         invoice.closed_at = datetime.utcnow()
         return True
-    invoice.status = "FINAL_REVIEW_PENDING"
-    invoice.current_owner = "MULTI"
+
+    # Keep the invoice with the real pending owner instead of marking it complete.
+    if not ready_physical_return:
+        invoice.status = "RETURN_PENDING"
+        invoice.current_owner = "WAREHOUSE"
+    elif not ready_customer:
+        invoice.status = "CUSTOMER_RECEIPT_PENDING"
+        invoice.current_owner = "SALES_REP"
+    elif not ready_discrepancy:
+        invoice.status = "DELIVERY_DISCREPANCY_PENDING"
+        invoice.current_owner = "HR"
+    else:
+        invoice.status = "FINAL_REVIEW_PENDING"
+        invoice.current_owner = "MULTI"
     return False
 
 
