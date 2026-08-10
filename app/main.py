@@ -320,7 +320,7 @@ def invoice_sequence_status(db: Session) -> dict:
 
 def maybe_close_invoice(invoice: Invoice):
     """Close only when every independent required track is complete."""
-    ready_document = bool(invoice.original_document_received)
+    ready_document = invoice.goods_source == "CUSTOMER_TRANSFER" or bool(invoice.original_document_received)
     ready_return = (not invoice.sales_return_required) or bool(invoice.sales_return_reviewed)
     ready_customer = (not invoice.customer_receipt_required) or bool(invoice.customer_receipt_received)
     ready_discrepancy = (not invoice.delivery_discrepancy_required) or bool(invoice.delivery_discrepancy_reviewed)
@@ -555,10 +555,9 @@ def get_queue(db: Session, user: dict):
         stmt = stmt.where(Invoice.status != "CLOSED")
     elif user["role"] == "HR":
         stmt = stmt.where(
-            Invoice.loaded_at.is_not(None),
             Invoice.status != "CLOSED",
             or_(
-                Invoice.original_document_received == False,
+                and_(Invoice.goods_source != "CUSTOMER_TRANSFER", Invoice.loaded_at.is_not(None), Invoice.original_document_received == False),
                 (Invoice.delivery_discrepancy_required == True) & (Invoice.delivery_discrepancy_reviewed == False),
             ),
         )
@@ -741,6 +740,10 @@ def create_invoice(
     invoice_no = invoice_no.strip()
     if db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no)):
         raise HTTPException(status_code=400, detail="رقم الفاتورة موجود مسبقًا.")
+    if not customer.strip():
+        raise HTTPException(status_code=400, detail="اسم العميل إجباري عند إدخال الفاتورة.")
+    if not sales_rep_id.strip() or not sales_rep_id.strip().isdigit():
+        raise HTTPException(status_code=400, detail="اختيار المندوب إجباري عند إدخال الفاتورة.")
     rep = None
     if sales_rep_id.strip():
         try:

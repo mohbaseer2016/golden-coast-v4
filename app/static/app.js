@@ -792,7 +792,7 @@ function showNewInvoice() {
   document.getElementById('modalTitle').textContent = 'إدخال فاتورة';
   document.getElementById('modalContent').innerHTML = `<form id="invoiceForm">
     <label>رقم الفاتورة</label><input name="invoice_no" required>
-    <label>اسم العميل الثاني / المستلم (اختياري)</label><input name="customer">
+    <label>اسم العميل / العميل الثاني المستلم (إجباري)</label><input name="customer" required>
     <label>مصدر البضاعة</label>
     <select id="goodsSource" name="goods_source">
       <option value="WAREHOUSE">من المخزن</option>
@@ -804,7 +804,7 @@ function showNewInvoice() {
       <small>هذا المسار لا يدخل المخزن ولا السائق؛ ينتقل من محاسب المبيعات مباشرة إلى المندوب.</small>
     </div>
     <label>المندوب (اختياري ويمكن إضافته لاحقًا)</label>
-    <select name="sales_rep_id"><option value="">بدون مندوب الآن</option>${state.salesReps.filter(r=>r.active).map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select>
+    <select name="sales_rep_id" required><option value="">بدون مندوب الآن</option>${state.salesReps.filter(r=>r.active).map(r=>`<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select>
     <label>تاريخ الفاتورة</label><input name="invoice_date" type="date" required value="${new Date().toISOString().slice(0,10)}">
     <label>ملاحظات</label><textarea name="notes"></textarea>
     <button class="success">حفظ وإرسال للمخزن</button>
