@@ -443,7 +443,7 @@ function returnForm(invoice, allIssues=[]) {
       <div class="return-source-badge">${source}</div>
       <div class="return-item-title"><b>${esc(x.product_name)}</b> — ${esc(x.quantity)} ${esc(x.unit||'')}</div>
       <label>هل استلم المخزن نفس الكمية المسجلة؟</label>
-      <select class="return-match" required>
+      <select class="return-match" required autocomplete="off">
         <option value="">اختر</option>
         <option value="yes">نعم، مطابق</option>
         <option value="no">لا، يوجد اختلاف</option>
@@ -646,6 +646,9 @@ function bindModalForms() {
             if(!returnPhoto){toast('صورة مستند المرتجع الكامل من المخزن إجبارية.',true);return;}
             form.querySelector('[name="delivery_mode"]')?.removeAttribute('disabled');
           }
+        }
+        if(id==='returnForm'){
+          if(!serializeReturnChecks(form)) return;
         }
         if(id==='driverForm'){
           const result=form.querySelector('[name="delivery_result"]')?.value;
@@ -1205,6 +1208,44 @@ function addIssueRow(containerId, allowType=true){
 function setupIssueEditor(form, rowsId, addId, allowType=true){
   const b=document.getElementById(addId); if(b) b.addEventListener('click',()=>addIssueRow(rowsId,allowType));
 }
+function serializeReturnChecks(form){
+  const rows=[...form.querySelectorAll('.return-check-row')];
+  const results=[];
+  for(const row of rows){
+    const id=Number(row.dataset.id||0);
+    const select=row.querySelector('.return-match');
+    const value=select?.value||'';
+    if(!id || !['yes','no'].includes(value)){
+      toast('يجب عمل مطابقة لكل صنف مرتجع قبل التأكيد.',true);
+      select?.focus();
+      return false;
+    }
+
+    const matched=value==='yes';
+    const actualInput=row.querySelector('.return-actual-qty');
+    const noteInput=row.querySelector('.return-item-note');
+    const actual=(actualInput?.value||'').trim();
+    const note=(noteInput?.value||'').trim();
+
+    if(!matched && !actual){
+      toast('اكتب الكمية المستلمة فعليًا للصنف غير المطابق.',true);
+      actualInput?.focus();
+      return false;
+    }
+
+    results.push({
+      id,
+      match: matched,
+      actual_quantity: matched ? '' : actual,
+      note: matched ? '' : note
+    });
+  }
+
+  const hidden=form.querySelector('[name="issue_results_json"]');
+  if(hidden) hidden.value=JSON.stringify(results);
+  return true;
+}
+
 function serializeIssueRows(form){
   const rows=[...form.querySelectorAll('.issue-row')].map(r=>({
     issue_type:r.querySelector('.issue-type')?.value||'مرتجع',
