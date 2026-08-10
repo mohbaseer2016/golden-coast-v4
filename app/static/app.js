@@ -1,6 +1,6 @@
 'use strict';
 
-const state = {user:null, drivers:[], salesReps:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], documents:[], invoiceSequence:{start:null,max:null,missing:[],configured:false}, permissions:{screens:[],actions:[]}, permissionCatalog:{}, invoiceSequence:{start:null,max:null,missing:[],configured:false}, current:null};
+const state = {user:null, drivers:[], salesReps:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], documents:[], invoiceSequence:{start:null,max:null,missing:[],configured:false}, permissions:{screens:[],actions:[]}, permissionCatalog:{}, warehouseDelayAlerts:[], current:null};
 
 const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
 let inactivityTimer = null;
@@ -56,6 +56,8 @@ document.addEventListener('DOMContentLoaded', () => {
   bind('saveSequenceStartBtn','click',saveInvoiceSequenceStart);
   bind('searchBtn','click',search);
   bind('closeModalBtn','click',closeModal);
+  bind('runReportBtn','click',runReport);
+  bind('printReportBtn','click',printCurrentReport);
 
   ['queueFilter','queueSort','queueSortDirection'].forEach(id=>bind(id, id==='queueFilter'?'input':'change', renderFilteredQueue));
   ['usersFilter','usersRoleFilter','usersStatusFilter','usersSort'].forEach(id=>bind(id, id==='usersFilter'?'input':'change', renderFilteredUsers));
@@ -128,6 +130,7 @@ async function bootstrap() {
     state.products = data.products || [];
     state.permissions = data.permissions || {screens:[],actions:[]};
     state.permissionCatalog = data.permission_catalog || {};
+    state.warehouseDelayAlerts = data.warehouse_delay_alerts || [];
     state.invoiceSequence = data.invoice_sequence || {start:null,max:null,missing:[],configured:false};
 
     document.getElementById('loginView').classList.add('hidden');
@@ -136,11 +139,13 @@ async function bootstrap() {
     renderInvoiceSequence();
     document.getElementById('newInvoiceBtn').classList.toggle('hidden', !state.permissions.actions.includes('invoice_create'));
     document.getElementById('usersTab').classList.toggle('hidden', !state.permissions.screens.includes('users'));
-    document.getElementById('documentsTab')?.classList.toggle('hidden', !['ADMIN','HR','SALES_ACCOUNTANT','SALES_REP'].includes(state.user.role));
+    document.getElementById('documentsTab')?.classList.toggle('hidden', !state.permissions.screens.includes('documents'));
     document.getElementById('vehiclesTab').classList.toggle('hidden', !state.permissions.screens.includes('vehicles'));
     document.getElementById('productsTab').classList.toggle('hidden', !state.permissions.screens.includes('products'));
     document.getElementById('salesRepsTab')?.classList.toggle('hidden', state.user.role !== 'ADMIN');
-    document.getElementById('logsTab').classList.toggle('hidden', state.user.role !== 'ADMIN');
+    document.getElementById('logsTab').classList.toggle('hidden', !state.permissions.screens.includes('logs'));
+    document.getElementById('reportsTab')?.classList.toggle('hidden', !state.permissions.screens.includes('reports'));
+    renderWarehouseDelayAlert();
 
     renderStats(data.stats);
     renderFilteredQueue();
@@ -156,21 +161,86 @@ async function bootstrap() {
 }
 
 function renderStats(stats) {
+  const can=(screen)=>state.permissions.screens.includes(screen);
   const cards = [
-    ['المعلقة عندي', stats.my_pending],
-    ['المخزن', stats.warehouse_pending],
-    ['السائقين', stats.driver_pending],
-    ['المرتجعات', stats.returns_pending],
-    ['المستندات', stats.documents_pending],
-    ['المكتملة', stats.closed],
-  ];
+    ['المعلقة عندي', stats.my_pending, 'mine', true],
+    ['المخزن', stats.warehouse_pending, 'warehouse', can('warehouse_card')],
+    ['السائقين', stats.driver_pending, 'drivers', can('drivers_card')],
+    ['المرتجعات', stats.returns_pending, 'returns', can('returns_card')],
+    ['المستندات', stats.documents_pending, 'documents', can('documents_card')],
+    ['المكتملة', stats.closed, 'closed', can('closed_card')],
+  ].filter(x=>x[3]);
   document.getElementById('stats').innerHTML =
-    cards.map((x,idx) => {
-      const buckets=['mine','warehouse','drivers','returns','documents','closed'];
-      return `<div class="card stat clickable-stat" data-bucket="${buckets[idx]}">${x[0]}<b>${x[1]}</b></div>`;
-    }).join('');
+    cards.map(x => `<div class="card stat clickable-stat" data-bucket="${x[2]}">${x[0]}<b>${x[1]}</b></div>`).join('');
   document.querySelectorAll('.clickable-stat').forEach(el => el.addEventListener('click', () => showDashboardBucket(el.dataset.bucket, el.firstChild.textContent)));
 }
+
+function renderWarehouseDelayAlert(){
+  const rows=state.warehouseDelayAlerts||[];
+  const allowed=state.permissions.actions.includes('warehouse_delay_alerts');
+  const targets=['globalWarehouseDelayAlertBox','warehouseDelayAlertBox']
+    .map(id=>document.getElementById(id)).filter(Boolean);
+  targets.forEach(box=>{
+    if(!allowed || !rows.length){box.classList.add('hidden');box.innerHTML='';box.onclick=null;return;}
+    box.classList.remove('hidden');
+    box.innerHTML=`<h3>⚠️ فواتير لم تتحرك من المخزن منذ 5 أيام أو أكثر (${rows.length})</h3>
+      <div class="delay-summary">الأقدم: ${Math.max(...rows.map(x=>x.days||0))} يوم — اضغط لعرض التفاصيل.</div>`;
+    box.onclick=()=>showWarehouseDelayAlertDetails();
+  });
+}
+function showWarehouseDelayAlertDetails(){
+  const rows=state.warehouseDelayAlerts||[];
+  document.getElementById('modalTitle').textContent='فواتير متأخرة في المخزن';
+  document.getElementById('modalContent').innerHTML=`<div class="table-wrap"><table><thead><tr><th>الفاتورة</th><th>العميل</th><th>المندوب</th><th>التاريخ</th><th>أيام التأخير</th><th></th></tr></thead>
+    <tbody>${rows.map(x=>`<tr class="${x.days>=15?'critical-delay':x.days>=10?'high-delay':''}"><td data-label="الفاتورة">${esc(x.invoice_no)}</td><td data-label="العميل">${esc(x.customer||'')}</td><td data-label="المندوب">${esc(x.sales_rep_name||'')}</td><td data-label="التاريخ">${dateOnlyText(x.invoice_date)}</td><td data-label="أيام التأخير">${x.days}</td><td data-label=""><button class="delay-open" data-no="${attr(x.invoice_no)}">فتح</button></td></tr>`).join('')}</tbody></table></div>`;
+  openModal();
+  document.querySelectorAll('.delay-open').forEach(btn=>btn.addEventListener('click',()=>openInvoice(btn.dataset.no)));
+}
+
+
+let currentReportTitle=''; let currentReportHtml='';
+async function runReport(){
+  try{
+    const type=document.getElementById('reportType').value;
+    const from=document.getElementById('reportFrom').value;
+    const to=document.getElementById('reportTo').value;
+    const driver=document.getElementById('reportDriver').value.trim();
+    const sales_rep=document.getElementById('reportSalesRep').value.trim();
+    const qs=new URLSearchParams({date_from:from,date_to:to,driver,sales_rep});
+    let data, html='', title='';
+    if(type==='summary' || type==='aging'){
+      data=await api('/api/reports/summary?'+qs);
+      title=type==='aging'?'تقرير أعمار الفواتير':'تقرير الفواتير';
+      if(type==='aging'){
+        const buckets={'0–2 أيام':0,'3–5 أيام':0,'6–10 أيام':0,'أكثر من 10 أيام':0};
+        const now=new Date();
+        data.rows.filter(x=>x.status!=='CLOSED').forEach(x=>{const d=Math.max(0,Math.floor((now-new Date(x.invoice_date))/86400000)); if(d<=2)buckets['0–2 أيام']++;else if(d<=5)buckets['3–5 أيام']++;else if(d<=10)buckets['6–10 أيام']++;else buckets['أكثر من 10 أيام']++;});
+        html=`<table><thead><tr><th>العمر</th><th>عدد الفواتير المعلقة</th></tr></thead><tbody>${Object.entries(buckets).map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</tbody></table>`;
+      }else{
+        document.getElementById('reportSummaryCards').innerHTML=`<div class="card stat">الإجمالي<b>${data.total}</b></div><div class="card stat">مكتملة<b>${data.closed}</b></div><div class="card stat">معلقة<b>${data.pending}</b></div><div class="card stat">بها مرتجعات<b>${data.returns}</b></div>`;
+        html=`<table><thead><tr><th>الفاتورة</th><th>العميل</th><th>المندوب</th><th>السائق</th><th>التاريخ</th><th>الحالة</th></tr></thead><tbody>${data.rows.map(x=>`<tr><td>${esc(x.invoice_no)}</td><td>${esc(x.customer||'')}</td><td>${esc(x.sales_rep_name||'')}</td><td>${esc(x.driver_name||'')}</td><td>${dateOnlyText(x.invoice_date)}</td><td>${statusName(x.status)}</td></tr>`).join('')}</tbody></table>`;
+      }
+    }else if(type==='returns'){
+      data=await api('/api/reports/returns?'+qs); title='تقرير المرتجعات';
+      html=`<table><thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>التاريخ</th><th>الأصناف المرتجعة</th><th>المخزن</th><th>مردود المبيعات</th></tr></thead><tbody>${data.map(x=>`<tr><td>${esc(x.invoice_no)}</td><td>${esc(x.customer||'')}</td><td>${esc(x.driver_name||'')}</td><td>${dateOnlyText(x.invoice_date)}</td><td>${(x.return_items||[]).map(i=>`${esc(i.product_name)}: ${esc(i.quantity)} ${esc(i.unit||'')}${i.warehouse_match===false?' (غير مطابق)':''}`).join('<br>')}</td><td>${x.return_received?'تم الاستلام':'معلق'}</td><td>${x.sales_return_reviewed?'تم عمل المردود':(x.sales_return_required?'معلق':'—')}</td></tr>`).join('')}</tbody></table>`;
+    }else{
+      data=await api('/api/reports/drivers?'+qs); title='تقرير أداء السائقين';
+      html=`<table><thead><tr><th>السائق</th><th>حمل</th><th>تم التسليم</th><th>إلى مكتب</th><th>مؤجل</th><th>مرتجعات</th></tr></thead><tbody>${data.map(x=>`<tr><td>${esc(x.driver)}</td><td>${x.loaded}</td><td>${x.delivered}</td><td>${x.office}</td><td>${x.postponed}</td><td>${x.returns}</td></tr>`).join('')}</tbody></table>`;
+    }
+    currentReportTitle=title; currentReportHtml=html;
+    document.getElementById('reportResults').innerHTML=html||'لا توجد بيانات.';
+  }catch(e){toast(e.message,true);}
+}
+function printCurrentReport(){
+  if(!state.permissions.actions.includes('reports_pdf')){toast('ليس لديك صلاحية طباعة التقارير PDF.',true);return;}
+  if(!currentReportHtml){toast('اعرض التقرير أولاً.',true);return;}
+  const from=document.getElementById('reportFrom').value||'البداية';
+  const to=document.getElementById('reportTo').value||'اليوم';
+  const w=window.open('','_blank');
+  w.document.write(`<!doctype html><html dir="rtl"><head><meta charset="utf-8"><title>${esc(currentReportTitle)}</title><style>body{font-family:Arial,sans-serif;padding:24px}h1{text-align:center}table{width:100%;border-collapse:collapse}th,td{border:1px solid #999;padding:7px;text-align:right}.meta{margin:12px 0;color:#444}@media print{button{display:none}}</style></head><body><h1>جولدن كوست — ${esc(currentReportTitle)}</h1><div class="meta">الفترة: ${esc(from)} إلى ${esc(to)} — طبع بواسطة: ${esc(state.user.name)} — ${new Date().toLocaleString('ar')}</div>${currentReportHtml}<p>يمكن اختيار «حفظ كملف PDF» من نافذة الطباعة.</p><button onclick="window.print()">طباعة / حفظ PDF</button></body></html>`);
+  w.document.close(); setTimeout(()=>w.print(),300);
+}
+
 
 function renderQueue(rows) {
   const body = document.getElementById('queueBody');
@@ -1104,12 +1174,12 @@ function renderLogs(rows) {
   const body = document.getElementById('logsBody');
   if (!body) return;
   body.innerHTML = rows.length ? rows.map(log => `<tr>
-    <td>${dateTimeText(log.created_at)}</td>
-    <td>${esc(log.username)}</td>
-    <td>${esc(log.action)}</td>
-    <td>${esc(log.invoice_no || '')}</td>
-    <td>${esc(log.details || '')}</td>
-    <td><button class="delete-log danger" data-id="${log.id}">حذف</button></td>
+    <td data-label="التاريخ">${dateTimeText(log.created_at)}</td>
+    <td data-label="المستخدم">${esc(log.username)}</td>
+    <td data-label="العملية">${esc(log.action)}</td>
+    <td data-label="الفاتورة">${esc(log.invoice_no || '')}</td>
+    <td data-label="التفاصيل">${esc(log.details || '')}</td>
+    <td data-label="">${state.user?.role==='ADMIN'?`<button class="delete-log danger" data-id="${log.id}">حذف</button>`:''}</td>
   </tr>`).join('') : '<tr><td colspan="6">لا توجد حركات.</td></tr>';
   body.querySelectorAll('.delete-log').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -1129,10 +1199,11 @@ function dateTimeText(value) {
 }
 
 function switchTab(tab) {
-  ['queue','search','documents','users','vehicles','products','salesReps','logs'].forEach(name => {
+  ['queue','search','documents','users','vehicles','products','salesReps','logs','reports'].forEach(name => {
     document.getElementById(name + 'Section').classList.toggle('hidden', name !== tab);
   });
   if(tab==='documents') loadDocuments();
+  if(tab==='reports') renderWarehouseDelayAlert();
   document.querySelectorAll('[data-tab]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
   });
@@ -1344,7 +1415,7 @@ async function showDashboardBucket(bucket,title){
       const desc=(document.getElementById('popupSortDirection')?.value||'asc')==='desc';
       const filtered=rows.filter(x=>[x.invoice_no,x.customer,x.driver_name].join(' ').toLowerCase().includes(q));
       const data=sortRows(filtered,key,desc);
-      document.getElementById('popupRows').innerHTML=`<div class="table-wrap"><table><thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>تاريخ الفاتورة</th><th>تاريخ التحميل</th><th></th></tr></thead><tbody>${data.map(i=>`<tr><td>${esc(i.invoice_no)}</td><td>${esc(i.customer||'')}</td><td>${esc(i.driver_name||'')}</td><td>${statusName(i.status)}</td><td>${dateTimeText(i.invoice_date)}</td><td>${dateTimeText(i.loaded_at)}</td><td><button class="popup-open" data-no="${attr(i.invoice_no)}">فتح</button></td></tr>`).join('')}</tbody></table></div>`;
+      document.getElementById('popupRows').innerHTML=`<div class="table-wrap"><table><thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>تاريخ الفاتورة</th><th>تاريخ التحميل</th><th></th></tr></thead><tbody>${data.map(i=>`<tr><td data-label="الفاتورة">${esc(i.invoice_no)}</td><td data-label="العميل">${esc(i.customer||'')}</td><td data-label="السائق">${esc(i.driver_name||'')}</td><td data-label="الحالة">${statusName(i.status)}</td><td data-label="تاريخ الفاتورة">${dateTimeText(i.invoice_date)}</td><td data-label="تاريخ التحميل">${dateTimeText(i.loaded_at)}</td><td data-label=""><button class="popup-open" data-no="${attr(i.invoice_no)}">فتح</button></td></tr>`).join('')}</tbody></table></div>`;
       document.querySelectorAll('.popup-open').forEach(b=>b.addEventListener('click',()=>openInvoice(b.dataset.no)));
     }; openModal(); draw(); document.getElementById('popupFilter').addEventListener('input',draw);document.getElementById('popupSort').addEventListener('change',draw);document.getElementById('popupSortDirection')?.addEventListener('change',draw);
   }catch(e){toast(e.message,true);}
@@ -1354,8 +1425,8 @@ function renderProducts(rows){
   b.innerHTML=rows.length?rows.map(p=>`<tr>
     <td data-label="الصنف">${esc(p.name)}</td>
     <td data-label="الوحدات">${esc((p.units||[]).join('، '))}</td>
-    <td>${p.active?'فعال':'موقوف'}</td>
-    <td>
+    <td data-label="الحالة">${p.active?'فعال':'موقوف'}</td>
+    <td data-label="">
       <button class="edit-product" data-id="${p.id}">تعديل</button>
       <button class="toggle-product secondary" data-id="${p.id}">${p.active?'تعطيل':'تفعيل'}</button>
       <button class="delete-product danger" data-id="${p.id}">حذف</button>

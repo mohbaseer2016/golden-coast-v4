@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import os
@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import or_, select, text
+from sqlalchemy import and_, or_, select, text
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
@@ -29,23 +29,29 @@ ROLES = {"ADMIN", "HR", "WAREHOUSE", "DRIVER", "SALES_ACCOUNTANT", "SALES_REP"}
 PERMISSION_CATALOG = {
     "screens": {
         "queue": "المعلقة عندي", "search": "البحث والأرشيف", "users": "المستخدمون",
-        "vehicles": "السيارات", "products": "الأصناف", "logs": "الحركات"
+        "vehicles": "السيارات", "products": "الأصناف", "logs": "الحركات",
+        "documents": "المستندات", "warehouse_card": "مربع المخزن",
+        "drivers_card": "مربع السائقين", "returns_card": "مربع المرتجعات",
+        "documents_card": "مربع المستندات", "closed_card": "مربع المكتملة",
+        "reports": "التقارير والتنبيهات"
     },
     "actions": {
         "invoice_create": "إضافة فاتورة", "invoice_edit": "تعديل فاتورة",
         "invoice_delete": "حذف فاتورة", "warehouse_approve": "اعتماد المخزن",
         "driver_approve": "اعتماد السائق", "return_approve": "استلام المرتجع",
         "close_invoice": "استلام أصل الفاتورة", "sales_return_review": "اعتماد مردود المبيعات", "customer_receipt_upload": "رفع استلام العميل", "delivery_discrepancy_review": "مراجعة فرق التسليم", "manage_users": "إدارة المستخدمين والصلاحيات",
-        "manage_vehicles": "إدارة السيارات", "manage_products": "إدارة الأصناف"
+        "manage_vehicles": "إدارة السيارات", "manage_products": "إدارة الأصناف",
+        "reports_view": "عرض التقارير", "reports_pdf": "طباعة التقارير PDF",
+        "warehouse_delay_alerts": "عرض تنبيهات تأخر المخزن"
     }
 }
 
 ROLE_DEFAULTS = {
     "ADMIN": {"screens": list(PERMISSION_CATALOG["screens"]), "actions": list(PERMISSION_CATALOG["actions"])},
-    "HR": {"screens": ["queue","search"], "actions": ["invoice_create","invoice_edit","close_invoice","delivery_discrepancy_review"]},
-    "WAREHOUSE": {"screens": ["queue","search"], "actions": ["warehouse_approve","return_approve"]},
-    "DRIVER": {"screens": ["queue","search"], "actions": ["driver_approve"]},
-    "SALES_ACCOUNTANT": {"screens": ["queue","search"], "actions": ["sales_return_review"]},
+    "HR": {"screens": ["queue","search","documents","documents_card"], "actions": ["invoice_create","invoice_edit","close_invoice","delivery_discrepancy_review"]},
+    "WAREHOUSE": {"screens": ["queue","search","warehouse_card","returns_card"], "actions": ["warehouse_approve","return_approve","warehouse_delay_alerts"]},
+    "DRIVER": {"screens": ["queue","search","drivers_card"], "actions": ["driver_approve"]},
+    "SALES_ACCOUNTANT": {"screens": ["queue","search","returns_card","reports"], "actions": ["sales_return_review","reports_view","reports_pdf","warehouse_delay_alerts"]},
     "SALES_REP": {"screens": ["queue","search"], "actions": ["customer_receipt_upload"]},
 }
 
@@ -235,6 +241,19 @@ def health():
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/manifest.webmanifest")
+def manifest():
+    return JSONResponse({
+        "name": "شركة جولدن كوست التجارية",
+        "short_name": "جولدن كوست",
+        "start_url": "/",
+        "display": "standalone",
+        "background_color": "#ffffff",
+        "theme_color": "#17365d",
+        "dir": "rtl",
+        "lang": "ar",
+    })
 
 
 @app.post("/api/login")
@@ -632,18 +651,140 @@ def get_stats(db: Session, user: dict):
         "closed": count("CLOSED"),
     }
 
+
+def _report_date(value: str, end=False):
+    if not value:
+        return None
+    dt = datetime.fromisoformat(value)
+    if end and len(value) <= 10:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return dt
+
+def warehouse_delay_alerts(db: Session):
+    cutoff = datetime.utcnow() - timedelta(days=5)
+    rows = db.scalars(
+        select(Invoice).where(
+            Invoice.status == "WAREHOUSE_PENDING",
+            Invoice.loaded_at.is_(None),
+            Invoice.invoice_date <= cutoff,
+        ).order_by(Invoice.invoice_date.asc())
+    ).all()
+    now = datetime.utcnow()
+    return [{
+        "invoice_no": x.invoice_no, "customer": x.customer, "sales_rep_name": x.sales_rep_name,
+        "invoice_date": x.invoice_date.isoformat() if x.invoice_date else None,
+        "days": max(0, (now.date() - x.invoice_date.date()).days) if x.invoice_date else 0,
+    } for x in rows]
+
+@app.get("/api/alerts/warehouse-delay")
+def get_warehouse_delay_alerts(request: Request, db: Session = Depends(get_db)):
+    user = require_permission(request, db, "warehouse_delay_alerts")
+    return warehouse_delay_alerts(db)
+
+@app.get("/api/reports/summary")
+def report_summary(request: Request, date_from: str = "", date_to: str = "", driver: str = "", sales_rep: str = "", db: Session = Depends(get_db)):
+    require_permission(request, db, "reports_view")
+    stmt = select(Invoice)
+    start, end = _report_date(date_from), _report_date(date_to, True)
+    if start: stmt = stmt.where(Invoice.invoice_date >= start)
+    if end: stmt = stmt.where(Invoice.invoice_date <= end)
+    if driver: stmt = stmt.where(Invoice.driver_name.ilike(f"%{driver.strip()}%"))
+    if sales_rep: stmt = stmt.where(Invoice.sales_rep_name.ilike(f"%{sales_rep.strip()}%"))
+    rows = db.scalars(stmt.order_by(Invoice.invoice_date.desc())).all()
+    status_counts = {}
+    for x in rows: status_counts[x.status] = status_counts.get(x.status, 0) + 1
+    return {
+        "total": len(rows), "status_counts": status_counts,
+        "closed": sum(x.status == "CLOSED" for x in rows),
+        "pending": sum(x.status != "CLOSED" for x in rows),
+        "returns": sum(bool(x.return_received or x.sales_return_required or x.driver_return_photo) for x in rows),
+        "rows": [invoice_dict(x) for x in rows],
+    }
+
+@app.get("/api/reports/returns")
+def report_returns(request: Request, date_from: str = "", date_to: str = "", driver: str = "", sales_rep: str = "", db: Session = Depends(get_db)):
+    require_permission(request, db, "reports_view")
+    stmt = select(Invoice).where(or_(Invoice.return_received == True, Invoice.sales_return_required == True, Invoice.driver_return_photo.is_not(None)))
+    start, end = _report_date(date_from), _report_date(date_to, True)
+    if start: stmt = stmt.where(Invoice.invoice_date >= start)
+    if end: stmt = stmt.where(Invoice.invoice_date <= end)
+    if driver: stmt = stmt.where(Invoice.driver_name.ilike(f"%{driver.strip()}%"))
+    if sales_rep: stmt = stmt.where(Invoice.sales_rep_name.ilike(f"%{sales_rep.strip()}%"))
+    rows = db.scalars(stmt.order_by(Invoice.invoice_date.desc())).all()
+
+    invoice_nos = [x.invoice_no for x in rows]
+    by_invoice = {}
+    if invoice_nos:
+        all_items = db.scalars(
+            select(InvoiceIssueItem).where(
+                InvoiceIssueItem.invoice_no.in_(invoice_nos),
+                InvoiceIssueItem.issue_type.in_(["مرتجع","مرتجع عميل","ناقص","نقص تحميل"]),
+            )
+        ).all()
+        for item in all_items:
+            by_invoice.setdefault(item.invoice_no, []).append(item)
+
+    out = []
+    for x in rows:
+        items = by_invoice.get(x.invoice_no, [])
+        out.append({**invoice_dict(x), "return_items":[{
+            "product_name": i.product_name, "unit": i.unit, "quantity": i.quantity,
+            "warehouse_match": i.warehouse_match, "actual_quantity": i.actual_quantity,
+            "note": i.warehouse_note, "issue_type": i.issue_type
+        } for i in items]})
+    return out
+
+@app.get("/api/reports/drivers")
+def report_drivers(request: Request, date_from: str = "", date_to: str = "", driver: str = "", sales_rep: str = "", db: Session = Depends(get_db)):
+    require_permission(request, db, "reports_view")
+    stmt = select(Invoice).where(
+        Invoice.loaded_at.is_not(None),
+        Invoice.delivery_mode.in_(["COMPANY_DRIVER", "EXTERNAL_DRIVER"]),
+    )
+    start, end = _report_date(date_from), _report_date(date_to, True)
+    if start: stmt = stmt.where(Invoice.invoice_date >= start)
+    if end: stmt = stmt.where(Invoice.invoice_date <= end)
+    if driver: stmt = stmt.where(Invoice.driver_name.ilike(f"%{driver.strip()}%"))
+    if sales_rep: stmt = stmt.where(Invoice.sales_rep_name.ilike(f"%{sales_rep.strip()}%"))
+    rows = db.scalars(stmt).all()
+
+    invoice_nos = [x.invoice_no for x in rows]
+    customer_return_invoices = set()
+    if invoice_nos:
+        customer_return_invoices = set(db.scalars(
+            select(InvoiceIssueItem.invoice_no).where(
+                InvoiceIssueItem.invoice_no.in_(invoice_nos),
+                InvoiceIssueItem.stage == "DRIVER",
+                InvoiceIssueItem.issue_type.in_(["مرتجع عميل", "مرتجع"]),
+            ).distinct()
+        ).all())
+
+    agg = {}
+    for x in rows:
+        name = x.driver_name or "غير محدد"
+        a = agg.setdefault(name, {"driver":name,"loaded":0,"delivered":0,"office":0,"postponed":0,"returns":0})
+        a["loaded"] += 1
+        if x.delivered_at: a["delivered"] += 1
+        if x.delivery_target == "TRANSPORT_OFFICE": a["office"] += 1
+        if x.status == "POSTPONED" or x.delivery_result in ["مؤجل","العميل مغلق"]: a["postponed"] += 1
+        if x.invoice_no in customer_return_invoices: a["returns"] += 1
+    return sorted(agg.values(), key=lambda x:(-x["loaded"],x["driver"]))
+
 @app.get("/api/bootstrap")
 def bootstrap(request: Request, db: Session = Depends(get_db)):
     user = require_user(request)
+    row = db.scalar(select(User).where(User.username == user["username"]))
+    perms = effective_permissions(row, user)
     return {
         "user": user,
         "stats": get_stats(db, user),
+        "warehouse_delay_alerts": warehouse_delay_alerts(db) if ("warehouse_delay_alerts" in perms["actions"] or user.get("username") == "admin") else [],
         "queue": get_queue(db, user),
         "drivers": list_drivers(db),
         "sales_reps": [{"id": r.id, "name": r.name, "phone": r.phone, "active": r.active} for r in db.scalars(select(SalesRep).order_by(SalesRep.name)).all()],
         "vehicles": list_vehicles(db),
-        "users": list_users(db) if user["role"] == "ADMIN" else [],
-        "logs": list_logs(db) if user["role"] == "ADMIN" else [],
+        "users": list_users(db) if (user.get("username") == "admin" or "users" in perms["screens"]) else [],
+        "logs": list_logs(db) if (user.get("username") == "admin" or "logs" in perms["screens"]) else [],
         "products": [{"id": p.id, "name": p.name, "units": json.loads(p.units_json or "[]"), "active": p.active}
                      for p in db.scalars(
                          (select(Product).order_by(Product.name)) if user["role"] == "ADMIN"
@@ -948,10 +1089,16 @@ def warehouse_update(
     invoice.delivery_target = None
     if full_warehouse_return:
         # driver_code and driver_name are NOT NULL in the existing database schema.
-        # A full warehouse return has no driver, so store empty strings instead of NULL.
         invoice.driver_code = ""
         invoice.driver_name = ""
+        invoice.external_driver_phone = None
         invoice.is_external_driver = False
+        invoice.vehicle_no = None
+    elif delivery_mode == "EXTERNAL_DRIVER":
+        invoice.driver_code = "EXTERNAL_DRIVER"
+        invoice.driver_name = external_driver_name.strip()
+        invoice.external_driver_phone = external_driver_phone.strip()
+        invoice.is_external_driver = True
         invoice.vehicle_no = None
     else:
         invoice.driver_code = driver.driver_code if driver else (
@@ -960,7 +1107,8 @@ def warehouse_update(
         invoice.driver_name = driver.name if driver else (
             invoice.sales_rep_name if delivery_mode == "SALES_REP_SELF" else "العميل نفسه"
         )
-        invoice.is_external_driver = delivery_mode == "EXTERNAL_DRIVER"
+        invoice.external_driver_phone = None
+        invoice.is_external_driver = False
         invoice.vehicle_no = f"{vehicle.name} - {vehicle.plate_no}" if vehicle else None
     invoice.warehouse_user = user["username"]
     invoice.load_status = load_status
@@ -1484,12 +1632,16 @@ def documents_archive(
     db: Session = Depends(get_db),
 ):
     user = require_user(request)
-    if user["role"] not in ["ADMIN", "HR", "SALES_ACCOUNTANT", "SALES_REP"]:
+    user_row = db.scalar(select(User).where(User.username == user["username"]))
+    perms = effective_permissions(user_row, user)
+    if user.get("username") != "admin" and "documents" not in perms["screens"]:
         raise HTTPException(status_code=403, detail="ليس لديك صلاحية لعرض المستندات.")
 
     stmt = select(Invoice)
     if user["role"] == "SALES_REP":
         stmt = stmt.where(Invoice.sales_rep_id == user.get("sales_rep_id"))
+    elif user["role"] == "DRIVER":
+        stmt = stmt.where(Invoice.driver_code == user.get("driver_code", ""))
 
     if q.strip():
         like = f"%{q.strip()}%"
@@ -1541,6 +1693,14 @@ def documents_archive(
 @app.get("/api/dashboard/{bucket}")
 def dashboard_bucket(bucket: str, request: Request, db: Session = Depends(get_db)):
     user = require_user(request)
+    user_row = db.scalar(select(User).where(User.username == user["username"]))
+    perms = effective_permissions(user_row, user)
+    required_screen = {
+        "warehouse": "warehouse_card", "drivers": "drivers_card",
+        "returns": "returns_card", "documents": "documents_card", "closed": "closed_card",
+    }.get(bucket)
+    if user.get("username") != "admin" and required_screen and required_screen not in perms["screens"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية عرض هذا المربع.")
     mapping = {
         "warehouse": ["WAREHOUSE_PENDING"], "drivers": ["DRIVER_PENDING","POSTPONED"],
         "returns": ["RETURN_PENDING"], "documents": ["DOCUMENT_PENDING","FINAL_REVIEW_PENDING","CUSTOMER_RECEIPT_PENDING","DELIVERY_DISCREPANCY_PENDING"], "closed": ["CLOSED"]
@@ -1953,7 +2113,11 @@ def delete_invoice(invoice_no: str, request: Request, db: Session = Depends(get_
 
 @app.get("/api/logs")
 def get_logs(request: Request, db: Session = Depends(get_db)):
-    require_role(request, ["ADMIN"])
+    user = require_user(request)
+    row = db.scalar(select(User).where(User.username == user["username"]))
+    perms = effective_permissions(row, user)
+    if user.get("username") != "admin" and "logs" not in perms["screens"]:
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية عرض سجل الحركات.")
     return list_logs(db)
 
 
@@ -2077,7 +2241,7 @@ def delete_vehicle(vehicle_id: int, request: Request, db: Session = Depends(get_
     vehicle = db.get(Vehicle, vehicle_id)
     if not vehicle:
         raise HTTPException(status_code=404, detail="السيارة غير موجودة.")
-    used = db.scalar(select(Invoice.id).where(Invoice.vehicle_id == vehicle_id).limit(1))
+    used = db.scalar(select(Invoice.id).where(Invoice.vehicle_no.like(f"%{vehicle.plate_no}%")).limit(1))
     if used:
         vehicle.active = False
         db.commit()
