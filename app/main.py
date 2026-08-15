@@ -290,13 +290,20 @@ def startup():
     Base.metadata.create_all(engine)
     ensure_columns()
     with Session(engine) as db:
-        upsert_user(db, "admin", "62420071", "المدير", "ADMIN")
-        upsert_user(db, "hr1", "123321", "فؤاد حاجب", "HR")
-        upsert_user(db, "inv1", "321", "معين", "WAREHOUSE")
-        upsert_user(db, "dr1", "852", "خالد قنبع", "DRIVER", "dr1")
-        upsert_user(db, "dr2", "321", "جميل", "DRIVER", "dr2")
-        upsert_user(db, "external", "000", "سائق خارجي", "DRIVER", "external", True)
-        db.commit()
+        # Seed the initial accounts only for a brand-new database.
+        # Previously each deploy recreated a default account (hr1/dr1/dr2/...) after
+        # an admin renamed it, because the old username was "missing". That made an
+        # edit look like a newly-added user after the next Render restart/deploy.
+        # Existing databases must be fully controlled from User Management.
+        has_any_user = db.scalar(select(User.id).limit(1)) is not None
+        if not has_any_user:
+            upsert_user(db, "admin", "62420071", "المدير", "ADMIN")
+            upsert_user(db, "hr1", "123321", "فؤاد حاجب", "HR")
+            upsert_user(db, "inv1", "321", "معين", "WAREHOUSE")
+            upsert_user(db, "dr1", "852", "خالد قنبع", "DRIVER", "dr1")
+            upsert_user(db, "dr2", "321", "جميل", "DRIVER", "dr2")
+            upsert_user(db, "external", "000", "سائق خارجي", "DRIVER", "external", True)
+            db.commit()
 
 
 @app.get("/health")
