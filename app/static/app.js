@@ -2,6 +2,14 @@
 
 const state = {user:null, drivers:[], salesReps:[], vehicles:[], users:[], logs:[], products:[], queue:[], searchRows:[], documents:[], invoiceSequence:{start:null,max:null,missing:[],configured:false}, permissions:{screens:[],actions:[]}, permissionCatalog:{}, warehouseDelayAlerts:[], current:null};
 
+// جميع أزرار فتح الفاتورة تستخدم مساراً موحداً حتى تستجيب من أول ضغطة
+// سواء بالماوس على اللابتوب أو باللمس على الهاتف، وحتى بعد إعادة رسم الجداول.
+const INVOICE_OPEN_SELECTOR = 'button.open,button.delay-open,button.doc-open-invoice,button.popup-open,button.retry-open-invoice';
+let invoiceOpenRequestSeq = 0;
+let invoiceOpeningNo = '';
+let invoiceOpeningPromise = null;
+let invoiceOpeningButton = null;
+
 const INACTIVITY_LIMIT_MS = 10 * 60 * 1000;
 let inactivityTimer = null;
 let lastActivityAt = Date.now();
@@ -39,6 +47,41 @@ function setupInactivityWatch() {
 }
 
 
+function invoiceOpenButtonFromEvent(event){
+  const target = event.target;
+  if (!(target instanceof Element)) return null;
+  return target.closest(INVOICE_OPEN_SELECTOR);
+}
+
+function setInvoiceOpenButtonBusy(button, active){
+  if (!button) return;
+  if (active) {
+    if (!button.dataset.openOldText) button.dataset.openOldText = button.textContent || 'فتح';
+    button.disabled = true;
+    button.classList.add('is-opening');
+    button.setAttribute('aria-busy', 'true');
+    button.textContent = 'يفتح...';
+  } else {
+    button.disabled = false;
+    button.classList.remove('is-opening');
+    button.removeAttribute('aria-busy');
+    if (button.dataset.openOldText) button.textContent = button.dataset.openOldText;
+  }
+}
+
+function waitForModalPaint(){
+  return new Promise(resolve => requestAnimationFrame(() => resolve()));
+}
+
+function handleInvoiceOpenClick(event){
+  const button = invoiceOpenButtonFromEvent(event);
+  if (!button || button.disabled) return;
+  const invoiceNo = button.dataset.no;
+  if (!invoiceNo) return;
+  event.preventDefault();
+  openInvoice(invoiceNo, button);
+}
+
 function handleSearchEnter(event){
   if(event.key!=='Enter' || event.isComposing) return;
   const el=event.target;
@@ -64,6 +107,8 @@ function handleSearchEnter(event){
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Event delegation in capture phase: dynamic tables do not need a second tap after rerender.
+  document.addEventListener('click', handleInvoiceOpenClick, true);
   document.addEventListener('keydown',handleSearchEnter);
   setupInactivityWatch();
   bind('loginForm','submit',login);
@@ -237,7 +282,6 @@ function showWarehouseDelayAlertDetails(){
   document.getElementById('modalContent').innerHTML=`<div class="table-wrap"><table><thead><tr><th>الفاتورة</th><th>العميل</th><th>المندوب</th><th>التاريخ</th><th>أيام التأخير</th><th></th></tr></thead>
     <tbody>${rows.map(x=>`<tr class="${x.days>=15?'critical-delay':x.days>=10?'high-delay':''}"><td data-label="الفاتورة">${esc(x.invoice_no)}</td><td data-label="العميل">${esc(x.customer||'')}</td><td data-label="المندوب">${esc(x.sales_rep_name||'')}</td><td data-label="التاريخ">${dateOnlyText(x.invoice_date)}</td><td data-label="أيام التأخير">${x.days}</td><td data-label=""><button class="delay-open" data-no="${attr(x.invoice_no)}">فتح</button></td></tr>`).join('')}</tbody></table></div>`;
   openModal();
-  document.querySelectorAll('.delay-open').forEach(btn=>btn.addEventListener('click',()=>openInvoice(btn.dataset.no)));
 }
 
 
@@ -313,7 +357,6 @@ function renderQueue(rows) {
     <td data-label="تاريخ التحميل">${i.loaded_at ? dateTimeText(i.loaded_at) : ''}</td>
     <td data-label=""><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
   </tr>`).join('') : '<tr><td colspan="7">لا توجد فواتير معلقة.</td></tr>';
-  body.querySelectorAll('.open').forEach(btn => btn.addEventListener('click', () => openInvoice(btn.dataset.no)));
 }
 
 function rowHtml(invoice) {
@@ -326,23 +369,61 @@ function rowHtml(invoice) {
   </tr>`;
 }
 
-async function openInvoice(invoiceNo) {
+async function openInvoice(invoiceNo, sourceButton=null) {
+  invoiceNo = String(invoiceNo || '').trim();
+  if (!invoiceNo) return;
+
+  // إذا ضغط المستخدم مرة ثانية أثناء فتح نفس الفاتورة لا نرسل طلباً ثانياً.
+  if (invoiceOpeningPromise && invoiceOpeningNo === invoiceNo) {
+    openModal();
+    return invoiceOpeningPromise;
+  }
+
+  const requestSeq = ++invoiceOpenRequestSeq;
+  if (invoiceOpeningButton && invoiceOpeningButton !== sourceButton) {
+    setInvoiceOpenButtonBusy(invoiceOpeningButton, false);
+  }
+  invoiceOpeningNo = invoiceNo;
+  invoiceOpeningButton = sourceButton;
+  setInvoiceOpenButtonBusy(sourceButton, true);
+
   document.getElementById('modalTitle').textContent = 'فاتورة ' + invoiceNo;
   document.getElementById('modalContent').innerHTML = '<div class="operation-loading"><span class="mini-spinner"></span> جاري فتح العمليات...</div>';
   openModal();
-  try {
-    const encoded = encodeURIComponent(invoiceNo);
-    const [invoice, movements, invoiceIssues] = await Promise.all([
-      api('/api/invoices/' + encoded),
-      api(`/api/invoices/${encoded}/movement`).catch(() => []),
-      api(`/api/invoices/${encoded}/issues`).catch(() => []),
-    ]);
-    state.current = invoice;
-    showInvoice(invoice, movements, invoiceIssues);
-  } catch (error) {
-    closeModal();
-    toast(error.message, true);
-  }
+
+  const task = (async () => {
+    try {
+      // أعطِ المتصفح فرصة لرسم نافذة التحميل قبل بدء طلب الشبكة.
+      await waitForModalPaint();
+      const encoded = encodeURIComponent(invoiceNo);
+      // طلب واحد بدلاً من ثلاثة طلبات منفصلة: أخف على الهاتف واللابتوب.
+      const data = await api(`/api/invoices/${encoded}/operations`);
+      if (requestSeq !== invoiceOpenRequestSeq) return;
+      const invoice = data.invoice;
+      const movements = data.movement || [];
+      const invoiceIssues = data.issues || [];
+      state.current = invoice;
+      showInvoice(invoice, movements, invoiceIssues);
+    } catch (error) {
+      if (requestSeq !== invoiceOpenRequestSeq) return;
+      document.getElementById('modalContent').innerHTML = `<div class="operation-open-error">
+        <b>تعذر فتح العمليات.</b>
+        <div>${esc(error.message || 'حدث خطأ')}</div>
+        <button type="button" class="retry-open-invoice" data-no="${attr(invoiceNo)}">إعادة المحاولة</button>
+      </div>`;
+      toast(error.message, true);
+    } finally {
+      if (requestSeq === invoiceOpenRequestSeq) {
+        setInvoiceOpenButtonBusy(invoiceOpeningButton, false);
+        invoiceOpeningButton = null;
+        invoiceOpeningNo = '';
+        invoiceOpeningPromise = null;
+      }
+    }
+  })();
+
+  invoiceOpeningPromise = task;
+  return task;
 }
 
 
@@ -870,7 +951,6 @@ function renderDocuments(){
     <td data-label="بواسطة">${esc(x.by||'')}</td>
     <td data-label="">${x.photo?`<a class="button-link" href="${attr(x.photo)}" target="_blank" rel="noopener">فتح الصورة</a>`:'بدون صورة'}</td>
   </tr>`).join(''):'<tr><td colspan="7">لا توجد مستندات في هذا القسم.</td></tr>';
-  body.querySelectorAll('.doc-open-invoice').forEach(b=>b.addEventListener('click',()=>openInvoice(b.dataset.no)));
 }
 
 function renderSalesReps(){
@@ -1501,7 +1581,6 @@ async function showDashboardBucket(bucket,title){
       const filtered=rows.filter(x=>[x.invoice_no,x.customer,x.driver_name].join(' ').toLowerCase().includes(q));
       const data=sortRows(filtered,key,desc);
       document.getElementById('popupRows').innerHTML=`<div class="table-wrap"><table><thead><tr><th>الفاتورة</th><th>العميل</th><th>السائق</th><th>الحالة</th><th>تاريخ الفاتورة</th><th>تاريخ التحميل</th><th></th></tr></thead><tbody>${data.map(i=>`<tr><td data-label="الفاتورة">${esc(i.invoice_no)}</td><td data-label="العميل">${esc(i.customer||'')}</td><td data-label="السائق">${esc(i.driver_name||'')}</td><td data-label="الحالة">${statusName(i.status)}</td><td data-label="تاريخ الفاتورة">${dateTimeText(i.invoice_date)}</td><td data-label="تاريخ التحميل">${dateTimeText(i.loaded_at)}</td><td data-label=""><button class="popup-open" data-no="${attr(i.invoice_no)}">فتح</button></td></tr>`).join('')}</tbody></table></div>`;
-      document.querySelectorAll('.popup-open').forEach(b=>b.addEventListener('click',()=>openInvoice(b.dataset.no)));
     }; openModal(); draw(); document.getElementById('popupFilter').addEventListener('input',draw);document.getElementById('popupSort').addEventListener('change',draw);document.getElementById('popupSortDirection')?.addEventListener('change',draw);
   }catch(e){toast(e.message,true);}
 }
@@ -1622,7 +1701,6 @@ function renderFilteredSearch(){
     <td data-label="تاريخ التحميل">${i.loaded_at?dateTimeText(i.loaded_at):''}</td>
     <td data-label=""><button class="open" data-no="${attr(i.invoice_no)}">فتح</button></td>
   </tr>`).join(''):'<tr><td colspan="7">لا توجد نتائج.</td></tr>';
-  body.querySelectorAll('.open').forEach(btn=>btn.addEventListener('click',()=>openInvoice(btn.dataset.no)));
 }
 
 function renderFilteredUsers(){

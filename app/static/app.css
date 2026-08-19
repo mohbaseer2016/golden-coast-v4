@@ -180,3 +180,20 @@ button.is-loading{position:relative;opacity:.8;cursor:wait}
 @keyframes gcspin{to{transform:rotate(360deg)}}
 button{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .document-preview-card img{content-visibility:auto}
+
+/* Single-tap invoice opening on laptop + phone */
+.open,.delay-open,.doc-open-invoice,.popup-open,.retry-open-invoice{
+  touch-action:manipulation;
+  -webkit-tap-highlight-color:transparent;
+  user-select:none;
+  -webkit-user-select:none;
+}
+.open:active,.delay-open:active,.doc-open-invoice:active,.popup-open:active,.retry-open-invoice:active{
+  transform:translateY(1px);
+}
+.open.is-opening,.delay-open.is-opening,.doc-open-invoice.is-opening,.popup-open.is-opening,.retry-open-invoice.is-opening{
+  cursor:wait;
+  opacity:.78;
+}
+.operation-open-error{display:grid;gap:10px;justify-items:start;min-height:120px;align-content:center}
+.operation-open-error button{min-width:130px}

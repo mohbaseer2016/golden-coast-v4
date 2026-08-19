@@ -1078,6 +1078,53 @@ def search_invoices(
     return [invoice_dict(x) for x in db.scalars(stmt.order_by(Invoice.created_at.desc()).limit(200)).all()]
 
 
+@app.get("/api/invoices/{invoice_no}/operations")
+def invoice_operations(invoice_no: str, request: Request, db: Session = Depends(get_db)):
+    """Return everything needed by the operation modal in one HTTP request.
+
+    This keeps the first tap responsive on both mobile and desktop and avoids
+    opening three parallel HTTP requests for invoice, movement and issue rows.
+    """
+    user = require_user(request)
+    invoice = db.scalar(select(Invoice).where(Invoice.invoice_no == invoice_no))
+    if not invoice:
+        raise HTTPException(status_code=404, detail="الفاتورة غير موجودة.")
+    if user["role"] == "DRIVER" and invoice.driver_code != user.get("driver_code", ""):
+        raise HTTPException(status_code=403, detail="ليس لديك صلاحية.")
+    if user["role"] == "SALES_REP" and invoice.sales_rep_id != user.get("sales_rep_id"):
+        raise HTTPException(status_code=403, detail="الفاتورة ليست مسندة لمندوبك.")
+
+    recovered = recover_existing_photo_links(invoice)
+    movement = goods_movement_timeline(db, invoice)
+    issue_rows = db.scalars(
+        select(InvoiceIssueItem)
+        .where(InvoiceIssueItem.invoice_no == invoice_no)
+        .order_by(InvoiceIssueItem.id)
+    ).all()
+    if recovered:
+        db.commit()
+
+    return {
+        "invoice": invoice_dict(invoice),
+        "movement": movement,
+        "issues": [
+            {
+                "id": x.id,
+                "stage": x.stage,
+                "issue_type": x.issue_type,
+                "product_id": x.product_id,
+                "product_name": x.product_name,
+                "unit": x.unit,
+                "quantity": x.quantity,
+                "warehouse_match": x.warehouse_match,
+                "actual_quantity": x.actual_quantity,
+                "warehouse_note": x.warehouse_note,
+            }
+            for x in issue_rows
+        ],
+    }
+
+
 @app.get("/api/invoices/{invoice_no}")
 def get_invoice(invoice_no: str, request: Request, db: Session = Depends(get_db)):
     user = require_user(request)

@@ -7,11 +7,12 @@ JS=(ROOT/'app/static/app.js').read_text(encoding='utf-8')
 CSS=(ROOT/'app/static/app.css').read_text(encoding='utf-8')
 
 
-def test_open_invoice_requests_are_parallel_and_modal_opens_immediately():
-    b=re.search(r'async function openInvoice\(invoiceNo\).*?(?=\n\nfunction showInvoice)',JS,re.S).group(0)
+def test_open_invoice_is_one_request_and_modal_opens_immediately():
+    b=re.search(r'async function openInvoice\(invoiceNo, sourceButton=null\).*?(?=\n\nfunction showInvoice)',JS,re.S).group(0)
     assert 'openModal();' in b
-    assert 'Promise.all([' in b
-    assert '/movement' in b and '/issues' in b
+    assert 'waitForModalPaint()' in b
+    assert '/operations' in b
+    assert 'Promise.all([' not in b
     assert 'جاري فتح العمليات' in b
 
 
