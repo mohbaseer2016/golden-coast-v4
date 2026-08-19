@@ -186,6 +186,23 @@ async function bootstrap() {
   }
 }
 
+async function refreshOperationalState() {
+  try {
+    const data = await api('/api/bootstrap?light=true');
+    state.user = data.user || state.user;
+    state.queue = data.queue || [];
+    state.permissions = data.permissions || state.permissions;
+    state.warehouseDelayAlerts = data.warehouse_delay_alerts || [];
+    state.invoiceSequence = data.invoice_sequence || state.invoiceSequence;
+    renderInvoiceSequence();
+    renderWarehouseDelayAlert();
+    renderStats(data.stats || {});
+    renderFilteredQueue();
+  } catch (error) {
+    console.error('Operational refresh failed', error);
+  }
+}
+
 function renderStats(stats) {
   const can=(screen)=>state.permissions.screens.includes(screen);
   const cards = [
@@ -310,19 +327,27 @@ function rowHtml(invoice) {
 }
 
 async function openInvoice(invoiceNo) {
+  document.getElementById('modalTitle').textContent = 'فاتورة ' + invoiceNo;
+  document.getElementById('modalContent').innerHTML = '<div class="operation-loading"><span class="mini-spinner"></span> جاري فتح العمليات...</div>';
+  openModal();
   try {
-    state.current = await api('/api/invoices/' + encodeURIComponent(invoiceNo));
-    showInvoice(state.current);
+    const encoded = encodeURIComponent(invoiceNo);
+    const [invoice, movements, invoiceIssues] = await Promise.all([
+      api('/api/invoices/' + encoded),
+      api(`/api/invoices/${encoded}/movement`).catch(() => []),
+      api(`/api/invoices/${encoded}/issues`).catch(() => []),
+    ]);
+    state.current = invoice;
+    showInvoice(invoice, movements, invoiceIssues);
   } catch (error) {
+    closeModal();
     toast(error.message, true);
   }
 }
 
-async function showInvoice(invoice) {
+
+function showInvoice(invoice, movements=[], invoiceIssues=[]) {
   document.getElementById('modalTitle').textContent = 'فاتورة ' + invoice.invoice_no;
-  let invoiceIssues=[]; let movements=[];
-  try { movements=await api(`/api/invoices/${encodeURIComponent(invoice.invoice_no)}/movement`); } catch(e) {}
-  try { invoiceIssues=await api(`/api/invoices/${encodeURIComponent(invoice.invoice_no)}/issues`); } catch(e) {}
 
   const modeNames={
     COMPANY_DRIVER:'سائق من الشركة',
@@ -356,7 +381,7 @@ async function showInvoice(invoice) {
   if(photos.length){
     html += `<div class="document-preview-grid">${photos.map(([label,url])=>`
       <a class="document-preview-card" href="${attr(url)}" target="_blank" rel="noopener">
-        <span>${esc(label)}</span><img src="${attr(url)}" alt="${esc(label)}">
+        <span>${esc(label)}</span><img src="${attr(url)}" alt="${esc(label)}" loading="lazy" decoding="async">
       </a>`).join('')}</div>`;
   }
 
@@ -586,14 +611,12 @@ function returnForm(invoice, allIssues=[]) {
 
 
 function closeForm(invoice) {
-  const receipt = invoice.customer_receipt_photo || invoice.receipt_photo || '';
-  const existingOriginal = invoice.original_document_photo || '';
-  return `<form id="closeForm" data-has-original-photo="${existingOriginal?'1':'0'}">
+  const invoicePhoto = invoice.original_document_photo || invoice.receipt_photo || invoice.customer_receipt_photo || invoice.carrier_receipt_photo || '';
+  return `<form id="closeForm">
     <div class="card">
       <b>متابعة أصل الفاتورة</b><br>
-      الموارد تؤكد وصول أصل الفاتورة الورقي، وتصور الأصل عند استلامه.
-      ${receipt ? `<div style="margin-top:8px"><a href="${attr(receipt)}" target="_blank" rel="noopener">فتح صورة استلام العميل المرفوعة سابقًا</a></div>` : ''}
-      ${existingOriginal ? `<div style="margin-top:8px"><a href="${attr(existingOriginal)}" target="_blank" rel="noopener">فتح صورة أصل الفاتورة الموجودة</a></div>` : ''}
+      الموارد تؤكد فقط وصول نفس أصل الفاتورة الورقي الذي تم تصويره سابقًا أثناء التسليم. لا حاجة لتصويره أو رفعه مرة ثانية.
+      ${invoicePhoto ? `<div style="margin-top:8px"><a href="${attr(invoicePhoto)}" target="_blank" rel="noopener">فتح صورة الفاتورة المرفوعة سابقًا</a></div>` : '<div class="muted" style="margin-top:8px">لا توجد صورة محفوظة لهذه الفاتورة القديمة؛ يمكن تأكيد وصول الأصل بدون إعادة تصويره.</div>'}
     </div>
     <label>هل تم استلام أصل الفاتورة؟</label>
     <select id="originalReceivedSelect" name="original_received" required>
@@ -601,11 +624,6 @@ function closeForm(invoice) {
       <option value="نعم">نعم، تم استلام الأصل</option>
       <option value="لا">لا، لم يصل الأصل بعد</option>
     </select>
-    <div id="originalDocumentPhotoField" class="hidden">
-      <label>صورة أصل الفاتورة ${existingOriginal?'(اختياري — توجد صورة محفوظة)':'(إجباري)'}</label>
-      <input name="original_document_photo" type="file" accept="image/*,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif">
-      <small>يتم ضغط الصورة قبل الرفع لتوفير المساحة والوقت.</small>
-    </div>
     <label>ملاحظات (اختياري)</label><textarea name="notes"></textarea>
     <button class="success">حفظ حالة أصل الفاتورة</button>
   </form>`;
@@ -744,19 +762,6 @@ function bindModalForms() {
       syncDriverForm();
     }
 
-    if (id === 'closeForm') {
-      const received=form.querySelector('#originalReceivedSelect');
-      const photoBox=form.querySelector('#originalDocumentPhotoField');
-      const photoInput=form.querySelector('[name="original_document_photo"]');
-      const hasExisting=form.dataset.hasOriginalPhoto==='1';
-      const syncOriginal=()=>{
-        const yes=received.value==='نعم';
-        photoBox.classList.toggle('hidden',!yes);
-        photoInput.required=yes && !hasExisting;
-      };
-      received.addEventListener('change',syncOriginal);
-      syncOriginal();
-    }
 
     if (id === 'customerReceiptForm') {
       const match=form.querySelector('#customerReceiptMatch');
@@ -809,14 +814,15 @@ function bindModalForms() {
         else if (id === 'editUserForm') url = '/api/users/' + encodeURIComponent(form.dataset.username);
         else url = `/api/invoices/${encodeURIComponent(state.current.invoice_no)}/${path}`;
 
-        const hasImageUpload = ['driverForm','warehouseForm','returnForm','closeForm','customerReceiptForm'].includes(id);
-        if (hasImageUpload) setSubmitting(form, true, 'جاري الرفع والاعتماد...');
+        const hasImageUpload = ['driverForm','warehouseForm','returnForm','customerReceiptForm'].includes(id);
+        setSubmitting(form, true, hasImageUpload ? 'جاري الرفع والاعتماد...' : 'جاري الاعتماد...');
         const body = hasImageUpload ? await optimizedFormData(form) : new FormData(form);
         await api(url, {method:'POST', body});
         closeModal();
         toast('تم الحفظ');
-        // حدّث البيانات بعد إغلاق النافذة حتى يشعر المستخدم بالاستجابة فوراً.
-        bootstrap();
+        // تحديث خفيف للعمليات بدل تنزيل المستخدمين والسجلات والمنتجات كاملة بعد كل اعتماد.
+        if (['userForm','vehicleForm','editUserForm'].includes(id)) bootstrap();
+        else refreshOperationalState();
       } catch (error) {
         setSubmitting(form, false);
         toast(error.message, true);
@@ -1238,6 +1244,16 @@ async function deleteCurrentInvoice() {
   } catch (error) { toast(error.message, true); }
 }
 
+async function loadLogs(){
+  if (!state.permissions.screens.includes('logs') && state.user?.role !== 'ADMIN') return;
+  try {
+    state.logs = await api('/api/logs');
+    renderFilteredLogs();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 function renderLogs(rows) {
   const body = document.getElementById('logsBody');
   if (!body) return;
@@ -1271,6 +1287,7 @@ function switchTab(tab) {
     document.getElementById(name + 'Section').classList.toggle('hidden', name !== tab);
   });
   if(tab==='documents') loadDocuments();
+  if(tab==='logs') loadLogs();
   if(tab==='reports') renderWarehouseDelayAlert();
   document.querySelectorAll('[data-tab]').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === tab);
@@ -1651,11 +1668,12 @@ function dateOnlyText(value){
 
 
 const optimizedImageCache = new WeakMap();
+const optimizedImagePromiseCache = new WeakMap();
 
-async function compressImageFileForUpload(file, maxSide=1280, quality=0.72) {
+async function compressImageFileForUpload(file, maxSide=1280, quality=0.68) {
   if (!file || !file.type || !file.type.startsWith('image/')) return file;
   // الصور الصغيرة لا تحتاج إعادة ضغط.
-  if (file.size <= 900 * 1024) return file;
+  if (file.size <= 650 * 1024) return file;
 
   try {
     const bitmap = await createImageBitmap(file);
@@ -1683,16 +1701,29 @@ async function compressImageFileForUpload(file, maxSide=1280, quality=0.72) {
   }
 }
 
+function optimizedImageForFile(file) {
+  if (optimizedImageCache.has(file)) return Promise.resolve(optimizedImageCache.get(file));
+  if (optimizedImagePromiseCache.has(file)) return optimizedImagePromiseCache.get(file);
+  const promise = compressImageFileForUpload(file)
+    .then(optimized => {
+      optimizedImageCache.set(file, optimized);
+      optimizedImagePromiseCache.delete(file);
+      return optimized;
+    })
+    .catch(error => {
+      optimizedImagePromiseCache.delete(file);
+      throw error;
+    });
+  optimizedImagePromiseCache.set(file, promise);
+  return promise;
+}
+
 async function optimizedFormData(form) {
   const fd = new FormData(form);
   const inputs = [...form.querySelectorAll('input[type="file"]')].filter(x => x.name && x.files && x.files[0]);
   await Promise.all(inputs.map(async input => {
     const original = input.files[0];
-    let optimized = optimizedImageCache.get(original);
-    if (!optimized) {
-      optimized = await compressImageFileForUpload(original);
-      optimizedImageCache.set(original, optimized);
-    }
+    const optimized = await optimizedImageForFile(original);
     fd.set(input.name, optimized, optimized.name || original.name);
   }));
   if (fd.get('vehicle_id') === '') fd.delete('vehicle_id');
@@ -1713,8 +1744,7 @@ function prepareImageInputs(form) {
       }
       hint.textContent = `جاري تجهيز الصورة ${(file.size/1024/1024).toFixed(1)} MB...`;
       try {
-        const optimized = await compressImageFileForUpload(file);
-        optimizedImageCache.set(file, optimized);
+        const optimized = await optimizedImageForFile(file);
         hint.textContent = `جاهزة للرفع — ${((optimized?.size || file.size)/1024/1024).toFixed(2)} MB`;
       } catch (_) {
         hint.textContent = 'جاهزة للرفع';
@@ -1732,6 +1762,7 @@ function setSubmitting(form, active, label='جاري الاعتماد...') {
     btn.classList.add('is-loading');
     btn.textContent = label;
   } else {
+    btn.disabled = false;
     btn.classList.remove('is-loading');
     btn.textContent = btn.dataset.oldText || 'اعتماد';
   }

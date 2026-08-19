@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -217,6 +218,25 @@ def save_upload(file: UploadFile | None, invoice_no: str, kind: str) -> str | No
     return "/" + str(target.relative_to(ROOT_DIR)).replace("\\", "/")
 
 
+def save_uploads_parallel(invoice_no: str, uploads: list[tuple[str, UploadFile | None, str]]) -> dict[str, str | None]:
+    """Upload independent images concurrently to reduce approval time on phone/laptop."""
+    present = [(key, file, kind) for key, file, kind in uploads if file and getattr(file, "filename", "")]
+    results: dict[str, str | None] = {key: None for key, _, _ in uploads}
+    if not present:
+        return results
+    if len(present) == 1:
+        key, file, kind = present[0]
+        results[key] = save_upload(file, invoice_no, kind)
+        return results
+
+    # Keep concurrency deliberately small for Render and mobile-originated requests.
+    with ThreadPoolExecutor(max_workers=min(3, len(present))) as pool:
+        futures = {pool.submit(save_upload, file, invoice_no, kind): key for key, file, kind in present}
+        for future, key in futures.items():
+            results[key] = future.result()
+    return results
+
+
 def recover_existing_photo_links(invoice: Invoice) -> bool:
     """Repair missing DB links from existing Supabase objects; never uploads a new file."""
     if not (os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")):
@@ -233,22 +253,28 @@ def recover_existing_photo_links(invoice: Invoice) -> bool:
         ("receipt_photo", ["delivery_receipt", "receipt_edit"], invoice.delivered_at),
         ("warehouse_photo", ["warehouse"], invoice.loaded_at),
     ]
+    if not invoice.carrier_receipt_photo:
+        carrier_at = invoice.loaded_at if invoice.delivery_mode == "EXTERNAL_DRIVER" else invoice.delivered_at
+        carrier_kinds = ["warehouse_handoff"] if invoice.delivery_mode == "EXTERNAL_DRIVER" else ["delivery_receipt", "receipt_edit"]
+        lookups.append(("carrier_receipt_photo", carrier_kinds, carrier_at))
+
+    # Group by Storage folder (year/month/invoice). Most invoices need only one list request.
+    grouped: dict[tuple[int, int], dict] = {}
     for field, kinds, at in lookups:
         if getattr(invoice, field, None) or not at:
             continue
-        found = storage.find_existing_image(invoice.invoice_no, kinds, at)
-        if found:
-            setattr(invoice, field, found)
-            changed = True
+        key = (at.year, at.month)
+        grouped.setdefault(key, {"at": at, "items": []})["items"].append((field, kinds))
 
-    # Carrier receipt may originate at warehouse handoff (external driver) or driver delivery to office.
-    if not invoice.carrier_receipt_photo:
-        at = invoice.loaded_at if invoice.delivery_mode == "EXTERNAL_DRIVER" else invoice.delivered_at
-        kinds = ["warehouse_handoff"] if invoice.delivery_mode == "EXTERNAL_DRIVER" else ["delivery_receipt", "receipt_edit"]
-        if at:
-            found = storage.find_existing_image(invoice.invoice_no, kinds, at)
+    for group in grouped.values():
+        rows = storage.list_existing_images(invoice.invoice_no, group["at"])
+        if not rows:
+            continue
+        for field, kinds in group["items"]:
+            prefixes = tuple(f"{kind}_" for kind in kinds)
+            found = next((row["url"] for row in rows if row["name"].startswith(prefixes)), None)
             if found:
-                invoice.carrier_receipt_photo = found
+                setattr(invoice, field, found)
                 changed = True
     return changed
 
@@ -844,15 +870,24 @@ def report_drivers(request: Request, date_from: str = "", date_to: str = "", dri
     return sorted(agg.values(), key=lambda x:(-x["loaded"],x["driver"]))
 
 @app.get("/api/bootstrap")
-def bootstrap(request: Request, db: Session = Depends(get_db)):
+def bootstrap(request: Request, light: bool = False, db: Session = Depends(get_db)):
     user = require_user(request)
     row = db.scalar(select(User).where(User.username == user["username"]))
     perms = effective_permissions(row, user)
-    return {
+    data = {
         "user": user,
         "stats": get_stats(db, user),
         "warehouse_delay_alerts": warehouse_delay_alerts(db) if ("warehouse_delay_alerts" in perms["actions"] or user.get("username") == "admin") else [],
         "queue": get_queue(db, user),
+        "permissions": perms,
+        "invoice_sequence": invoice_sequence_status(db),
+    }
+    # After an operational approval, the UI only needs queue/stats/alerts.
+    # This avoids repeatedly downloading users/logs/products/drivers on phones.
+    if light:
+        return data
+
+    data.update({
         "drivers": list_drivers(db),
         "sales_reps": [{"id": r.id, "name": r.name, "phone": r.phone, "active": r.active} for r in db.scalars(select(SalesRep).order_by(SalesRep.name)).all()],
         "vehicles": list_vehicles(db),
@@ -864,9 +899,8 @@ def bootstrap(request: Request, db: Session = Depends(get_db)):
                          else (select(Product).where(Product.active == True).order_by(Product.name))
                      ).all()],
         "permission_catalog": PERMISSION_CATALOG,
-        "permissions": effective_permissions(db.scalar(select(User).where(User.username == user["username"])), user),
-        "invoice_sequence": invoice_sequence_status(db),
-    }
+    })
+    return data
 
 
 @app.get("/api/sales-reps")
@@ -1124,13 +1158,13 @@ def warehouse_update(
         if not vehicle or not vehicle.active:
             raise HTTPException(status_code=400, detail="السيارة غير موجودة أو موقوفة.")
 
-    handoff_photo = None if full_warehouse_return else save_upload(receipt_photo, invoice_no, "warehouse_handoff")
-    if not full_warehouse_return and delivery_mode == "CUSTOMER_SELF" and not handoff_photo:
+    handoff_selected = bool(receipt_photo and getattr(receipt_photo, "filename", ""))
+    if not full_warehouse_return and delivery_mode == "CUSTOMER_SELF" and not handoff_selected:
         raise HTTPException(status_code=400, detail="صورة استلام العميل إجبارية عندما يستلم من المخزن.")
-    if not full_warehouse_return and delivery_mode == "EXTERNAL_DRIVER" and not handoff_photo:
+    if not full_warehouse_return and delivery_mode == "EXTERNAL_DRIVER" and not handoff_selected:
         raise HTTPException(status_code=400, detail="صورة استلام السائق الخارجي من المخزن إجبارية.")
 
-    # Parse shortage rows before changing the invoice.
+    # Parse shortage rows before uploading/changing the invoice.
     try:
         issue_rows = json.loads(issues_json or "[]")
     except Exception:
@@ -1159,6 +1193,12 @@ def warehouse_update(
             status_code=400,
             detail="عند التحميل الناقص يجب تحديد الصنف والوحدة والكمية التي لم تُحمّل.",
         )
+
+    uploaded = save_uploads_parallel(invoice_no, [
+        ("handoff", None if full_warehouse_return else receipt_photo, "warehouse_handoff"),
+        ("warehouse", photo, "warehouse"),
+    ])
+    handoff_photo = uploaded["handoff"]
 
     invoice.delivery_mode = None if full_warehouse_return else delivery_mode
     invoice.delivery_target = None
@@ -1189,7 +1229,7 @@ def warehouse_update(
     invoice.load_status = load_status
     invoice.warehouse_shortage_reason = shortage_reason.strip() or None
     invoice.warehouse_notes = notes.strip() or None
-    invoice.warehouse_photo = save_upload(photo, invoice_no, "warehouse") or invoice.warehouse_photo
+    invoice.warehouse_photo = uploaded["warehouse"] or invoice.warehouse_photo
     invoice.loaded_at = datetime.fromisoformat(loaded_at) if loaded_at else datetime.utcnow()
 
     db.query(InvoiceIssueItem).filter(
@@ -1290,9 +1330,9 @@ def driver_update(
             detail="الفاتورة تحتاج مندوبًا لمتابعة استلام العميل من مكتب النقل. أضف المندوب أولًا.",
         )
 
-    receipt = save_upload(receipt_photo, invoice_no, "delivery_receipt")
-    returned = save_upload(return_photo, invoice_no, "return_driver")
-    if delivery_result not in ["مؤجل", "العميل مغلق"] and not (receipt or invoice.receipt_photo):
+    if delivery_result not in ["مؤجل", "العميل مغلق"] and not (
+        (receipt_photo and getattr(receipt_photo, "filename", "")) or invoice.receipt_photo
+    ):
         target_name = "مكتب النقل" if delivery_target == "TRANSPORT_OFFICE" else "العميل"
         raise HTTPException(status_code=400, detail=f"يجب رفع صورة استلام {target_name} قبل الاعتماد.")
 
@@ -1315,6 +1355,13 @@ def driver_update(
 
     if delivery_result in ["تم جزئي", "رفض كامل"] and not valid_return_rows:
         raise HTTPException(status_code=400, detail="عند وجود مرتجع من العميل يجب تحديد الصنف والوحدة والكمية.")
+
+    uploaded = save_uploads_parallel(invoice_no, [
+        ("receipt", receipt_photo, "delivery_receipt"),
+        ("return", return_photo, "return_driver"),
+    ])
+    receipt = uploaded["receipt"]
+    returned = uploaded["return"]
 
     db.query(InvoiceIssueItem).filter(
         InvoiceIssueItem.invoice_no == invoice_no,
@@ -1480,16 +1527,12 @@ def customer_receipt_update(
     if match_status not in ["MATCH", "SHORT", "OVER"]:
         raise HTTPException(status_code=400, detail="حالة المطابقة غير صحيحة.")
 
-    receipt = save_upload(receipt_photo, invoice_no, "customer_final_receipt")
-    if not receipt:
+    if not (receipt_photo and getattr(receipt_photo, "filename", "")):
         raise HTTPException(status_code=400, detail="صورة استلام العميل النهائي إجبارية.")
-    if invoice.goods_source == "CUSTOMER_TRANSFER":
-        source_photo = save_upload(source_return_photo, invoice_no, "source_customer_return")
-        if not source_photo:
-            raise HTTPException(status_code=400, detail="صورة السحب من العميل الأول إجبارية.")
-        invoice.source_return_photo = source_photo
-        invoice.source_return_received_at = datetime.utcnow()
-        invoice.source_return_received_by = user["username"]
+    if invoice.goods_source == "CUSTOMER_TRANSFER" and not (
+        source_return_photo and getattr(source_return_photo, "filename", "")
+    ):
+        raise HTTPException(status_code=400, detail="صورة السحب من العميل الأول إجبارية.")
 
     try:
         issue_rows = json.loads(issues_json or "[]")
@@ -1513,6 +1556,16 @@ def customer_receipt_update(
             status_code=400,
             detail="عند وجود فرق يجب تحديد الصنف والوحدة وكمية الفرق.",
         )
+
+    uploaded = save_uploads_parallel(invoice_no, [
+        ("receipt", receipt_photo, "customer_final_receipt"),
+        ("source", source_return_photo if invoice.goods_source == "CUSTOMER_TRANSFER" else None, "source_customer_return"),
+    ])
+    receipt = uploaded["receipt"]
+    if invoice.goods_source == "CUSTOMER_TRANSFER":
+        invoice.source_return_photo = uploaded["source"]
+        invoice.source_return_received_at = datetime.utcnow()
+        invoice.source_return_received_by = user["username"]
 
     db.query(InvoiceIssueItem).filter(
         InvoiceIssueItem.invoice_no == invoice_no,
@@ -1623,7 +1676,6 @@ def close_invoice(
     request: Request,
     original_received: str = Form(...),
     notes: str = Form(""),
-    original_document_photo: UploadFile | None = File(None),
     db: Session = Depends(get_db),
 ):
     user = require_permission(request, db, "close_invoice")
@@ -1645,15 +1697,12 @@ def close_invoice(
         audit(db, "ORIGINAL_DOCUMENT_NOT_RECEIVED", user["username"], invoice_no)
         return {"ok": True, "closed": False, "original_received": False}
 
-    # Restore the original-invoice photo workflow. Upload only when a new file was selected.
-    # If an old image is already linked/recovered, do not create a duplicate Storage object.
+    # The paper received by HR is the same invoice already photographed during delivery.
+    # Reuse the existing Storage URL; never ask HR to upload/copy the same image again.
     if not invoice.original_document_photo:
-        recover_existing_photo_links(invoice)
-    original_image = save_upload(original_document_photo, invoice_no, "original_document")
-    if original_image:
-        invoice.original_document_photo = original_image
-    if not invoice.original_document_photo:
-        raise HTTPException(status_code=400, detail="صورة أصل الفاتورة إجبارية عند تأكيد استلام الأصل.")
+        invoice.original_document_photo = (
+            invoice.receipt_photo or invoice.customer_receipt_photo or invoice.carrier_receipt_photo
+        )
 
     invoice.original_document_received = True
     invoice.original_document_received_at = datetime.utcnow()
@@ -1738,7 +1787,7 @@ def documents_archive(
     recovered_any = False
     for inv in rows:
         needs_recovery = (
-            (category == "originals" and inv.original_document_received and not inv.original_document_photo) or
+            (category == "originals" and inv.original_document_received and not (inv.original_document_photo or inv.receipt_photo or inv.customer_receipt_photo or inv.carrier_receipt_photo)) or
             (category == "returns" and (inv.return_received or inv.sales_return_reviewed) and not (inv.return_photo or inv.driver_return_photo)) or
             (category == "customer_receipts" and inv.customer_receipt_received and not (inv.customer_receipt_photo or inv.receipt_photo)) or
             (category == "carrier_receipts" and not inv.carrier_receipt_photo)
@@ -1751,13 +1800,13 @@ def documents_archive(
             # Legacy compatibility: older versions sometimes stored the photographed
             # original invoice in receipt_photo. Display that existing object only;
             # never copy it or upload another file.
-            original_photo = inv.original_document_photo or inv.receipt_photo
+            original_photo = (inv.original_document_photo or inv.receipt_photo or inv.customer_receipt_photo or inv.carrier_receipt_photo)
             data.append({
                 "invoice_no": str(inv.invoice_no or ""), "customer": inv.customer, "sales_rep_name": inv.sales_rep_name,
                 "date": inv.original_document_received_at.isoformat() if inv.original_document_received_at else None,
                 "by": inv.original_document_received_by, "photo": original_photo,
                 "label": "أصل الفاتورة",
-                "legacy_photo": bool(not inv.original_document_photo and inv.receipt_photo),
+                "legacy_photo": bool(not inv.original_document_photo and original_photo),
             })
         elif category == "returns":
             if not (inv.return_received or inv.sales_return_reviewed):
@@ -2111,8 +2160,12 @@ def edit_invoice_driver(
         if invoice.status == "DOCUMENT_PENDING" and invoice.original_document_received:
             raise HTTPException(status_code=403, detail="أغلقت الموارد الفاتورة ولا يمكن تعديلها.")
 
-    receipt = save_upload(receipt_photo, invoice_no, "receipt_edit")
-    returned = save_upload(return_photo, invoice_no, "return_driver_edit")
+    uploaded = save_uploads_parallel(invoice_no, [
+        ("receipt", receipt_photo, "receipt_edit"),
+        ("return", return_photo, "return_driver_edit"),
+    ])
+    receipt = uploaded["receipt"]
+    returned = uploaded["return"]
     if user["role"] == "DRIVER" and not (receipt or invoice.receipt_photo):
         raise HTTPException(status_code=400, detail="يجب رفع صورة الاستلام قبل اعتماد النتيجة.")
     try:

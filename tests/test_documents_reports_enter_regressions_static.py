@@ -11,7 +11,10 @@ def test_documents_invoice_number_visible():
 
 def test_legacy_original_photo_is_display_only():
     b=re.search(r'@app\.get\("/api/documents"\).*?(?=\n@app\.)',MAIN,re.S).group(0)
-    assert "original_photo = inv.original_document_photo or inv.receipt_photo" in b
+    assert "original_photo = (inv.original_document_photo" in b
+    assert "or inv.receipt_photo" in b
+    assert "or inv.customer_receipt_photo" in b
+    assert "or inv.carrier_receipt_photo" in b
     assert '"legacy_photo": bool(' in b
     assert "save_upload(" not in b
 

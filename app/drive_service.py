@@ -50,10 +50,10 @@ class SupabaseStorage:
         encoded_path = quote(object_path, safe="/")
         return f"{self.supabase_url}/storage/v1/object/public/{self.bucket}/{encoded_path}"
 
-    def find_existing_image(self, invoice_no: str, kinds: list[str], at: datetime | None = None) -> str | None:
-        """Find an already-stored invoice image without creating/copying any object."""
+    def list_existing_images(self, invoice_no: str, at: datetime | None = None) -> list[dict[str, str]]:
+        """List an invoice folder once so multiple missing photo links can be recovered cheaply."""
         if not at:
-            return None
+            return []
         safe_invoice = "".join(c for c in str(invoice_no) if c.isalnum() or c in ("-", "_")) or "invoice"
         prefix = f"{at.year}/{at.month:02d}/{safe_invoice}"
         headers = {
@@ -69,19 +69,28 @@ class SupabaseStorage:
             "sortBy": {"column": "created_at", "order": "desc"},
         }
         try:
-            response = httpx.post(url, json=body, headers=headers, timeout=8.0)
+            response = httpx.post(url, json=body, headers=headers, timeout=6.0)
             if response.status_code != 200:
-                return None
+                return []
             rows = response.json()
         except (httpx.RequestError, ValueError):
-            return None
+            return []
 
-        normalized = tuple(f"{kind}_" for kind in kinds)
+        result = []
         for row in rows if isinstance(rows, list) else []:
             name = str(row.get("name") or "")
-            if name.startswith(normalized):
-                return self._public_url(f"{prefix}/{name}")
+            if name:
+                result.append({"name": name, "url": self._public_url(f"{prefix}/{name}")})
+        return result
+
+    def find_existing_image(self, invoice_no: str, kinds: list[str], at: datetime | None = None) -> str | None:
+        """Find an already-stored invoice image without creating/copying any object."""
+        normalized = tuple(f"{kind}_" for kind in kinds)
+        for row in self.list_existing_images(invoice_no, at):
+            if row["name"].startswith(normalized):
+                return row["url"]
         return None
+
 
     def upload_image(self, invoice_no: str, kind: str, raw: bytes) -> str:
         now = datetime.now()

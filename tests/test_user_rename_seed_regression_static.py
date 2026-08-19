@@ -17,5 +17,5 @@ def test_default_users_seed_only_on_empty_database():
     assert 'upsert_user(db, "dr1"' in startup
 
 def test_edit_form_uses_update_endpoint():
-    assert "id=\\\"editUserForm\\\"" in JS
+    assert 'id="editUserForm"' in JS
     assert "url = '/api/users/' + encodeURIComponent(form.dataset.username)" in JS

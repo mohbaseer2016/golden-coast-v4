@@ -173,3 +173,10 @@ button.is-loading{position:relative;opacity:.8;cursor:wait}
   #reportsSection tr{display:table-row!important}
   #reportsSection th,#reportsSection td{display:table-cell!important;width:auto!important;min-width:110px;white-space:normal}
 }
+
+/* Fast operational feedback on laptop and phone */
+.operation-loading{display:flex;align-items:center;justify-content:center;gap:10px;min-height:120px;color:var(--muted);font-weight:700}
+.mini-spinner{width:20px;height:20px;border:3px solid #dbe4ef;border-top-color:var(--blue);border-radius:50%;animation:gcspin .7s linear infinite}
+@keyframes gcspin{to{transform:rotate(360deg)}}
+button{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+.document-preview-card img{content-visibility:auto}
